@@ -1,0 +1,21 @@
+# Build outputs
+bin/
+dist/
+build/
+tmp/
+*.exe
+*.out
+
+# Env / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS/editor
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
