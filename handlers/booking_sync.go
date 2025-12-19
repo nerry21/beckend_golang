@@ -403,7 +403,7 @@ func buildBookingHint(bookingID int64) string {
 
 func buildTicketInvoiceHint(bookingID int64) string {
 	// Disarankan dipakai PassengerInfo.jsx untuk tombol:
-	// navigate(`/reguler?bookingId=${bookingID}`) atau route yang kamu pakai.
+	// navigate(`/booking?bookingId=${bookingID}`) atau route yang kamu pakai.
 	return fmt.Sprintf("ETICKET_INVOICE_FROM_BOOKING:%d", bookingID)
 }
 
@@ -721,6 +721,15 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 				args = append(args, p.Category)
 			}
 
+			// ✅ FIX: kirim marker E-Ticket+Invoice dari booking ke data penumpang
+			// Tujuannya: kolom E-Ticket di PassengerInfo langsung bisa dibuka (tanpa reload/new tab)
+			// dan menampilkan E-Ticket + Invoice dari booking yang sudah lunas.
+			// Catatan: ini hanya untuk E-Ticket/Invoice. Surat jalan tetap ada di Trip Information.
+			if hasColumn(tx, "passengers", "eticket_photo") {
+				sets = append(sets, "eticket_photo=?")
+				args = append(args, buildTicketInvoiceHint(p.BookingID))
+			}
+
 			if hasColumn(tx, "passengers", "total_amount") {
 				sets = append(sets, "total_amount=?")
 				args = append(args, totalStr)
@@ -753,21 +762,6 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			if hasColumn(tx, "passengers", "surat_jalan_api") {
 				sets = append(sets, "surat_jalan_api=?")
 				args = append(args, buildSuratJalanAPI(p.BookingID))
-			}
-
-			// ✅ FIX: isi eticket_photo dengan hint jika masih kosong (tanpa menimpa foto yang sudah ada)
-			if hasColumn(tx, "passengers", "eticket_photo") {
-				var curET sql.NullString
-				_ = tx.QueryRow(`SELECT COALESCE(eticket_photo,'') FROM passengers WHERE id=? LIMIT 1`, existingID).Scan(&curET)
-				cur := strings.TrimSpace(curET.String)
-
-				// hanya isi jika kosong / marker lama
-				if cur == "" ||
-					strings.HasPrefix(cur, "ETICKET_INVOICE_FROM_BOOKING:") ||
-					strings.HasPrefix(cur, "BOOKING:") {
-					sets = append(sets, "eticket_photo=?")
-					args = append(args, buildTicketInvoiceHint(p.BookingID))
-				}
 			}
 
 			if hasColumn(tx, "passengers", "updated_at") {
@@ -843,10 +837,11 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.Category)
 		}
 
-		// e-ticket: kalau kolomnya ada, isi minimal marker/hint (biar UI bisa tampilkan link/btn)
+		// ✅ FIX: E-Ticket+Invoice harus ikut tersimpan ke data penumpang setelah booking sukses/lunas.
+		// Isi dengan marker yang akan dibaca PassengerInfo.jsx.
+		// (Bukan surat jalan. Surat jalan tetap disimpan di Trip Information.)
 		if hasColumn(tx, "passengers", "eticket_photo") {
 			cols = append(cols, "eticket_photo")
-			// ✅ FIX: sebelumnya kosong, sekarang isi hint supaya tampil di Data Penumpang
 			vals = append(vals, buildTicketInvoiceHint(p.BookingID))
 		}
 
