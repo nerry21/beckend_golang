@@ -205,8 +205,8 @@ func readBookingPayload(tx *sql.Tx, bookingID int64) (BookingSyncPayload, error)
 		pickup  sql.NullString
 		dropoff sql.NullString
 
-		bookingFor    sql.NullString
-		passengerName sql.NullString
+		bookingFor     sql.NullString
+		passengerName  sql.NullString
 		passengerPhone sql.NullString
 
 		paymentMethod sql.NullString
@@ -380,6 +380,73 @@ func autoTripNumber(date, timeStr, from, to string) string {
 	return fmt.Sprintf("TRIP-%s-%s-%s-%s", dd, tt, norm(from), norm(to))
 }
 
+/*
+	========================================================
+	✅ TAMBAHAN (TIDAK MENGHAPUS KODE LAMA):
+	- Build "hint/link" agar frontend PassengerInfo/TripInformation bisa membuka
+	  E-ticket+invoice dan E-surat-jalan dari data yang disimpan.
+	- Karena E-ticket+invoice dirender frontend, backend menyimpan referensinya.
+	========================================================
+*/
+
+// Link E-Surat Jalan memang sudah ada endpoint API
+func buildSuratJalanAPI(bookingID int64) string {
+	return fmt.Sprintf("/api/reguler/bookings/%d/surat-jalan", bookingID)
+}
+
+// "Hint" untuk frontend agar bisa membuka invoice/e-ticket dari bookingId.
+// Kalau di frontend route kamu berbeda, tinggal pakai bookingId dari notes.
+func buildBookingHint(bookingID int64) string {
+	// opsi aman: simpan bookingId saja; frontend yang bentuk URL
+	return fmt.Sprintf("BOOKING_ID:%d", bookingID)
+}
+
+func buildTicketInvoiceHint(bookingID int64) string {
+	// Disarankan dipakai PassengerInfo.jsx untuk tombol:
+	// navigate(`/reguler?bookingId=${bookingID}`) atau route yang kamu pakai.
+	return fmt.Sprintf("ETICKET_INVOICE_FROM_BOOKING:%d", bookingID)
+}
+
+type syncNotes struct {
+	BookingID          int64  `json:"bookingId"`
+	SuratJalanAPI      string `json:"suratJalanApi"`
+	ETicketInvoiceHint string `json:"eTicketInvoiceHint"`
+	BookingHint        string `json:"bookingHint"`
+}
+
+func buildSyncNotesJSON(bookingID int64) string {
+	n := syncNotes{
+		BookingID:          bookingID,
+		SuratJalanAPI:      buildSuratJalanAPI(bookingID),
+		ETicketInvoiceHint: buildTicketInvoiceHint(bookingID),
+		BookingHint:        buildBookingHint(bookingID),
+	}
+	b, _ := json.Marshal(n)
+	return string(b)
+}
+
+func mergeNotes(existing string, bookingID int64) string {
+	existing = strings.TrimSpace(existing)
+	newJSON := buildSyncNotesJSON(bookingID)
+
+	// kalau kosong, langsung isi json
+	if existing == "" {
+		return newJSON
+	}
+
+	// kalau sudah berisi json dan ada bookingId sama, biarkan
+	var cur syncNotes
+	if err := json.Unmarshal([]byte(existing), &cur); err == nil {
+		if cur.BookingID == bookingID && cur.SuratJalanAPI != "" {
+			return existing
+		}
+	}
+
+	// kalau notes sudah ada teks lain, jangan hilangkan:
+	// append dengan separator yang aman
+	return existing + "\n" + newJSON
+}
+
 func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 	// 1) INFORMASI PERJALANAN (trip_information) + e-surat jalan
 	if hasTable(tx, "trip_information") {
@@ -388,7 +455,7 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 		}
 	}
 
-	// 2) DATA PENUMPANG (passengers) + e-ticket marker (minimal: link di notes)
+	// 2) DATA PENUMPANG (passengers) + e-ticket/invoice hint
 	if hasTable(tx, "passengers") {
 		if err := upsertPassengers(tx, p); err != nil {
 			return err
@@ -401,7 +468,7 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 
 func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	tripNo := autoTripNumber(p.Date, p.Time, p.From, p.To)
-	esuratURL := fmt.Sprintf("/api/reguler/bookings/%d/surat-jalan", p.BookingID)
+	esuratURL := buildSuratJalanAPI(p.BookingID)
 
 	var existingID int64
 	_ = tx.QueryRow(`SELECT id FROM trip_information WHERE trip_number=? LIMIT 1`, tripNo).Scan(&existingID)
@@ -422,6 +489,28 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 		if hasColumn(tx, "trip_information", "e_surat_jalan") {
 			sets = append(sets, "e_surat_jalan=?")
 			args = append(args, esuratURL)
+		}
+
+		// ✅ TAMBAHAN (tanpa menghapus yang lama)
+		if hasColumn(tx, "trip_information", "route_from") {
+			sets = append(sets, "route_from=?")
+			args = append(args, p.From)
+		}
+		if hasColumn(tx, "trip_information", "route_to") {
+			sets = append(sets, "route_to=?")
+			args = append(args, p.To)
+		}
+		if hasColumn(tx, "trip_information", "category") {
+			sets = append(sets, "category=?")
+			args = append(args, p.Category)
+		}
+		if hasColumn(tx, "trip_information", "passenger_count") {
+			sets = append(sets, "passenger_count=?")
+			args = append(args, int64(len(p.SelectedSeats)))
+		}
+		if hasColumn(tx, "trip_information", "updated_at") {
+			sets = append(sets, "updated_at=?")
+			args = append(args, time.Now())
 		}
 
 		if len(sets) == 0 {
@@ -460,6 +549,32 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	if hasColumn(tx, "trip_information", "e_surat_jalan") {
 		cols = append(cols, "e_surat_jalan")
 		vals = append(vals, esuratURL)
+	}
+
+	// ✅ TAMBAHAN (tanpa menghapus yang lama)
+	if hasColumn(tx, "trip_information", "route_from") {
+		cols = append(cols, "route_from")
+		vals = append(vals, p.From)
+	}
+	if hasColumn(tx, "trip_information", "route_to") {
+		cols = append(cols, "route_to")
+		vals = append(vals, p.To)
+	}
+	if hasColumn(tx, "trip_information", "category") {
+		cols = append(cols, "category")
+		vals = append(vals, p.Category)
+	}
+	if hasColumn(tx, "trip_information", "passenger_count") {
+		cols = append(cols, "passenger_count")
+		vals = append(vals, int64(len(p.SelectedSeats)))
+	}
+	if hasColumn(tx, "trip_information", "created_at") {
+		cols = append(cols, "created_at")
+		vals = append(vals, time.Now())
+	}
+	if hasColumn(tx, "trip_information", "updated_at") {
+		cols = append(cols, "updated_at")
+		vals = append(vals, time.Now())
 	}
 
 	ph := make([]string, 0, len(cols))
@@ -551,6 +666,9 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 		totalStr := fmt.Sprintf("%d", p.TotalAmount)
 		notes := fmt.Sprintf("Auto sync dari booking %d. Lihat E-Ticket/Invoice di halaman booking.", p.BookingID)
 
+		// ✅ TAMBAHAN: simpan JSON hint agar PassengerInfo.jsx bisa tampilkan tombol buka E-ticket/Invoice dan surat jalan
+		syncJSON := buildSyncNotesJSON(p.BookingID)
+
 		if existingID > 0 {
 			sets := []string{}
 			args := []any{}
@@ -609,8 +727,47 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			}
 
 			if hasColumn(tx, "passengers", "notes") {
+				// ✅ TAMBAHAN: jangan hilangkan notes lama
+				var existingNotes sql.NullString
+				_ = tx.QueryRow(`SELECT COALESCE(notes,'') FROM passengers WHERE id=? LIMIT 1`, existingID).Scan(&existingNotes)
+				merged := notes
+				if existingNotes.Valid {
+					merged = mergeNotes(existingNotes.String, p.BookingID)
+				} else {
+					merged = notes + "\n" + syncJSON
+				}
+
 				sets = append(sets, "notes=?")
-				args = append(args, notes)
+				args = append(args, merged)
+			}
+
+			// ✅ TAMBAHAN: kalau ada kolom khusus untuk simpan hint/url
+			if hasColumn(tx, "passengers", "booking_hint") {
+				sets = append(sets, "booking_hint=?")
+				args = append(args, buildBookingHint(p.BookingID))
+			}
+			if hasColumn(tx, "passengers", "eticket_invoice_hint") {
+				sets = append(sets, "eticket_invoice_hint=?")
+				args = append(args, buildTicketInvoiceHint(p.BookingID))
+			}
+			if hasColumn(tx, "passengers", "surat_jalan_api") {
+				sets = append(sets, "surat_jalan_api=?")
+				args = append(args, buildSuratJalanAPI(p.BookingID))
+			}
+
+			// ✅ FIX: isi eticket_photo dengan hint jika masih kosong (tanpa menimpa foto yang sudah ada)
+			if hasColumn(tx, "passengers", "eticket_photo") {
+				var curET sql.NullString
+				_ = tx.QueryRow(`SELECT COALESCE(eticket_photo,'') FROM passengers WHERE id=? LIMIT 1`, existingID).Scan(&curET)
+				cur := strings.TrimSpace(curET.String)
+
+				// hanya isi jika kosong / marker lama
+				if cur == "" ||
+					strings.HasPrefix(cur, "ETICKET_INVOICE_FROM_BOOKING:") ||
+					strings.HasPrefix(cur, "BOOKING:") {
+					sets = append(sets, "eticket_photo=?")
+					args = append(args, buildTicketInvoiceHint(p.BookingID))
+				}
 			}
 
 			if hasColumn(tx, "passengers", "updated_at") {
@@ -686,21 +843,38 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.Category)
 		}
 
-		// e-ticket: kalau kolomnya ada, isi minimal marker (biar UI bisa tampilkan link/btn)
+		// e-ticket: kalau kolomnya ada, isi minimal marker/hint (biar UI bisa tampilkan link/btn)
 		if hasColumn(tx, "passengers", "eticket_photo") {
 			cols = append(cols, "eticket_photo")
-			vals = append(vals, "") // (opsional) kalau nanti ada endpoint e-ticket, bisa isi URL/base64 di sini
+			// ✅ FIX: sebelumnya kosong, sekarang isi hint supaya tampil di Data Penumpang
+			vals = append(vals, buildTicketInvoiceHint(p.BookingID))
 		}
 
 		if hasColumn(tx, "passengers", "notes") {
+			// ✅ TAMBAHAN: gabungkan notes dengan sync json hint
 			cols = append(cols, "notes")
-			vals = append(vals, notes)
+			vals = append(vals, notes+"\n"+syncJSON)
 		}
 
 		if hasColumn(tx, "passengers", "booking_id") {
 			cols = append(cols, "booking_id")
 			vals = append(vals, p.BookingID)
 		}
+
+		// ✅ TAMBAHAN: kolom hint/url kalau ada
+		if hasColumn(tx, "passengers", "booking_hint") {
+			cols = append(cols, "booking_hint")
+			vals = append(vals, buildBookingHint(p.BookingID))
+		}
+		if hasColumn(tx, "passengers", "eticket_invoice_hint") {
+			cols = append(cols, "eticket_invoice_hint")
+			vals = append(vals, buildTicketInvoiceHint(p.BookingID))
+		}
+		if hasColumn(tx, "passengers", "surat_jalan_api") {
+			cols = append(cols, "surat_jalan_api")
+			vals = append(vals, buildSuratJalanAPI(p.BookingID))
+		}
+
 		if hasColumn(tx, "passengers", "created_at") {
 			cols = append(cols, "created_at")
 			vals = append(vals, time.Now())

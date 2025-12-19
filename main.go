@@ -112,6 +112,10 @@ func main() {
 		api.PUT("/trip-information/:id", handlers.UpdateTripInformation)
 		api.DELETE("/trip-information/:id", handlers.DeleteTripInformation)
 
+		// ✅ (FIX) Endpoint untuk E-Surat Jalan per Trip Information
+		// FE memanggil: GET /api/trip-information/:id/surat-jalan
+		api.GET("/trip-information/:id/surat-jalan", handlers.GetTripSuratJalan)
+
 		// ============================
 		// FINANCIAL TRIPS
 		// ============================
