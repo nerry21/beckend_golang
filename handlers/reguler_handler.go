@@ -32,8 +32,8 @@ type RegulerQuoteRequest struct {
 }
 
 type RegulerQuoteResponse struct {
-	PricePerSeat int   `json:"pricePerSeat"`
-	Total        int64 `json:"total"`
+	PricePerSeat int    `json:"pricePerSeat"`
+	Total        int64  `json:"total"`
 	Route        string `json:"route"`
 }
 
@@ -703,25 +703,40 @@ func CreateRegulerBooking(c *gin.Context) {
 
 // ======================================================
 // ✅ 5) GET /api/reguler/bookings/:id/surat-jalan
+//    ✅ FIX: support ?scope=trip (gabung semua booking 1 jadwal)
 // ======================================================
 
 type SuratJalanPassenger struct {
-	Seat string `json:"seat"`
-	Name string `json:"name"`
+	Seat  string `json:"seat"`
+	Name  string `json:"name"`
+	Phone string `json:"phone,omitempty"` // kompatibel lama
+
+	// ✅ tambahan untuk mode trip (gabungan)
+	PickupLocation   string `json:"pickupLocation,omitempty"`
+	DropoffLocation  string `json:"dropoffLocation,omitempty"`
+	Fare             int64  `json:"fare,omitempty"`
+	Status           string `json:"status,omitempty"`
+	BookingID        int64  `json:"bookingId,omitempty"`
+	PassengerBooking string `json:"passengerBooking,omitempty"`
 }
 
 type RegulerSuratJalanResponse struct {
-	BookingID       int64                `json:"bookingId"`
-	RouteFrom       string               `json:"routeFrom"`
-	RouteTo         string               `json:"routeTo"`
-	TripDate        string               `json:"tripDate"`
-	TripTime        string               `json:"tripTime"`
-	PickupLocation  string               `json:"pickupLocation"`
-	DropoffLocation string               `json:"dropoffLocation"`
-	PricePerSeat    int64                `json:"pricePerSeat"`
-	Total           int64                `json:"total"`
-	PassengerPhone  string               `json:"passengerPhone"`
+	BookingID       int64                 `json:"bookingId"`
+	RouteFrom       string                `json:"routeFrom"`
+	RouteTo         string                `json:"routeTo"`
+	TripDate        string                `json:"tripDate"`
+	TripTime        string                `json:"tripTime"`
+	PickupLocation  string                `json:"pickupLocation"`
+	DropoffLocation string                `json:"dropoffLocation"`
+	PricePerSeat    int64                 `json:"pricePerSeat"`
+	Total           int64                 `json:"total"`
+	PassengerPhone  string                `json:"passengerPhone"`
+	PaymentStatus   string                `json:"paymentStatus,omitempty"`
 	Passengers      []SuratJalanPassenger `json:"passengers"`
+
+	// ✅ tambahan untuk frontend (opsional)
+	Scope            string `json:"scope,omitempty"`            // "booking" | "trip"
+	TripBookingCount int    `json:"tripBookingCount,omitempty"` // jumlah booking gabungan
 }
 
 func GetRegulerSuratJalan(c *gin.Context) {
@@ -731,6 +746,8 @@ func GetRegulerSuratJalan(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "id tidak valid"})
 		return
 	}
+
+	scope := strings.ToLower(strings.TrimSpace(c.Query("scope"))) // "" | "trip"
 
 	var (
 		routeFrom       string
@@ -742,34 +759,67 @@ func GetRegulerSuratJalan(c *gin.Context) {
 		pricePerSeat    int64
 		total           int64
 		phoneStr        string
+		paymentStatus   string
 	)
 
-	if hasColumn(config.DB, "bookings", "passenger_phone") {
+	withBookingPhone := hasColumn(config.DB, "bookings", "passenger_phone")
+	withPaymentStatus := hasColumn(config.DB, "bookings", "payment_status")
+
+	// ✅ query fleksibel (hindari error kalau kolom belum ada)
+	if withBookingPhone {
 		var passengerPhone sql.NullString
-		err = config.DB.QueryRow(`
-			SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total, passenger_phone
-			FROM bookings
-			WHERE id = ?
-			LIMIT 1
-		`, id64).Scan(
-			&routeFrom, &routeTo, &tripDate, &tripTime,
-			&pickupLocation, &dropoffLocation,
-			&pricePerSeat, &total, &passengerPhone,
-		)
+
+		if withPaymentStatus {
+			err = config.DB.QueryRow(`
+				SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total, passenger_phone, COALESCE(payment_status,'')
+				FROM bookings
+				WHERE id = ?
+				LIMIT 1
+			`, id64).Scan(
+				&routeFrom, &routeTo, &tripDate, &tripTime,
+				&pickupLocation, &dropoffLocation,
+				&pricePerSeat, &total, &passengerPhone, &paymentStatus,
+			)
+		} else {
+			err = config.DB.QueryRow(`
+				SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total, passenger_phone
+				FROM bookings
+				WHERE id = ?
+				LIMIT 1
+			`, id64).Scan(
+				&routeFrom, &routeTo, &tripDate, &tripTime,
+				&pickupLocation, &dropoffLocation,
+				&pricePerSeat, &total, &passengerPhone,
+			)
+		}
+
 		if passengerPhone.Valid {
 			phoneStr = strings.TrimSpace(passengerPhone.String)
 		}
 	} else {
-		err = config.DB.QueryRow(`
-			SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total
-			FROM bookings
-			WHERE id = ?
-			LIMIT 1
-		`, id64).Scan(
-			&routeFrom, &routeTo, &tripDate, &tripTime,
-			&pickupLocation, &dropoffLocation,
-			&pricePerSeat, &total,
-		)
+		if withPaymentStatus {
+			err = config.DB.QueryRow(`
+				SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total, COALESCE(payment_status,'')
+				FROM bookings
+				WHERE id = ?
+				LIMIT 1
+			`, id64).Scan(
+				&routeFrom, &routeTo, &tripDate, &tripTime,
+				&pickupLocation, &dropoffLocation,
+				&pricePerSeat, &total, &paymentStatus,
+			)
+		} else {
+			err = config.DB.QueryRow(`
+				SELECT route_from, route_to, trip_date, trip_time, pickup_location, dropoff_location, price_per_seat, total
+				FROM bookings
+				WHERE id = ?
+				LIMIT 1
+			`, id64).Scan(
+				&routeFrom, &routeTo, &tripDate, &tripTime,
+				&pickupLocation, &dropoffLocation,
+				&pricePerSeat, &total,
+			)
+		}
 	}
 
 	if err != nil {
@@ -781,16 +831,273 @@ func GetRegulerSuratJalan(c *gin.Context) {
 		return
 	}
 
+	// ======================================================
+	// ✅ MODE GABUNGAN: scope=trip
+	// Gabungkan semua booking dengan route + date + time yang sama
+	// ======================================================
+	if scope == "trip" {
+		type bRow struct {
+			ID            int64
+			Pickup        string
+			Dropoff       string
+			PricePerSeat  int64
+			Total         int64
+			Phone         string
+			PaymentStatus string
+		}
+
+		bookings := []bRow{}
+
+		if withBookingPhone && withPaymentStatus {
+			rows, qerr := config.DB.Query(`
+				SELECT id,
+				       pickup_location, dropoff_location,
+				       price_per_seat, total,
+				       COALESCE(passenger_phone,''), COALESCE(payment_status,'')
+				FROM bookings
+				WHERE route_from=? AND route_to=? AND trip_date=? AND trip_time=?
+			`, routeFrom, routeTo, tripDate, tripTime)
+			if qerr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal query bookings trip: " + qerr.Error()})
+				return
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var r bRow
+				if err := rows.Scan(&r.ID, &r.Pickup, &r.Dropoff, &r.PricePerSeat, &r.Total, &r.Phone, &r.PaymentStatus); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal scan bookings trip: " + err.Error()})
+					return
+				}
+				bookings = append(bookings, r)
+			}
+			if err := rows.Err(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca bookings trip: " + err.Error()})
+				return
+			}
+		} else if withBookingPhone {
+			rows, qerr := config.DB.Query(`
+				SELECT id,
+				       pickup_location, dropoff_location,
+				       price_per_seat, total,
+				       COALESCE(passenger_phone,'')
+				FROM bookings
+				WHERE route_from=? AND route_to=? AND trip_date=? AND trip_time=?
+			`, routeFrom, routeTo, tripDate, tripTime)
+			if qerr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal query bookings trip: " + qerr.Error()})
+				return
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var r bRow
+				if err := rows.Scan(&r.ID, &r.Pickup, &r.Dropoff, &r.PricePerSeat, &r.Total, &r.Phone); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal scan bookings trip: " + err.Error()})
+					return
+				}
+				bookings = append(bookings, r)
+			}
+			if err := rows.Err(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca bookings trip: " + err.Error()})
+				return
+			}
+		} else {
+			rows, qerr := config.DB.Query(`
+				SELECT id,
+				       pickup_location, dropoff_location,
+				       price_per_seat, total
+				FROM bookings
+				WHERE route_from=? AND route_to=? AND trip_date=? AND trip_time=?
+			`, routeFrom, routeTo, tripDate, tripTime)
+			if qerr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal query bookings trip: " + qerr.Error()})
+				return
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var r bRow
+				if err := rows.Scan(&r.ID, &r.Pickup, &r.Dropoff, &r.PricePerSeat, &r.Total); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal scan bookings trip: " + err.Error()})
+					return
+				}
+				bookings = append(bookings, r)
+			}
+			if err := rows.Err(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca bookings trip: " + err.Error()})
+				return
+			}
+		}
+
+		passengers := []SuratJalanPassenger{}
+		sumTotal := int64(0)
+
+		for _, b := range bookings {
+			sumTotal += b.Total
+
+			gotAny := false
+
+			// prioritas booking_passengers
+			if hasTable(config.DB, "booking_passengers") {
+				order := bestOrderBy(config.DB, "booking_passengers")
+
+				withPassengerPhone := hasColumn(config.DB, "booking_passengers", "passenger_phone")
+
+				q := `
+					SELECT seat_code, passenger_name
+					FROM booking_passengers
+					WHERE booking_id = ?
+				`
+				if withPassengerPhone {
+					q = `
+						SELECT seat_code, passenger_name, passenger_phone
+						FROM booking_passengers
+						WHERE booking_id = ?
+					`
+				}
+				if order != "" {
+					q += " ORDER BY " + order
+				}
+
+				rows, qerr := config.DB.Query(q, b.ID)
+				if qerr != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal query booking_passengers: " + qerr.Error()})
+					return
+				}
+
+				for rows.Next() {
+					var seat, name string
+					var pphone sql.NullString
+
+					if withPassengerPhone {
+						if err := rows.Scan(&seat, &name, &pphone); err != nil {
+							_ = rows.Close()
+							c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca data penumpang: " + err.Error()})
+							return
+						}
+					} else {
+						if err := rows.Scan(&seat, &name); err != nil {
+							_ = rows.Close()
+							c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca data penumpang: " + err.Error()})
+							return
+						}
+					}
+
+					gotAny = true
+
+					ph := strings.TrimSpace(b.Phone)
+					if pphone.Valid && strings.TrimSpace(pphone.String) != "" {
+						ph = strings.TrimSpace(pphone.String)
+					}
+					if ph == "" {
+						ph = phoneStr // fallback dari booking utama
+					}
+
+					passengers = append(passengers, SuratJalanPassenger{
+						Seat:            strings.ToUpper(strings.TrimSpace(seat)),
+						Name:            strings.TrimSpace(name),
+						Phone:           ph,
+						PickupLocation:  strings.TrimSpace(b.Pickup),
+						DropoffLocation: strings.TrimSpace(b.Dropoff),
+						Fare:            b.PricePerSeat,
+						Status:          strings.TrimSpace(b.PaymentStatus),
+						BookingID:       b.ID,
+					})
+				}
+				_ = rows.Close()
+			}
+
+			// fallback booking_seats
+			if !gotAny && hasTable(config.DB, "booking_seats") {
+				order := bestOrderBy(config.DB, "booking_seats")
+				q := `
+					SELECT seat_code
+					FROM booking_seats
+					WHERE booking_id = ?
+				`
+				if order != "" {
+					q += " ORDER BY " + order
+				}
+
+				rows, qerr := config.DB.Query(q, b.ID)
+				if qerr != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal query booking_seats: " + qerr.Error()})
+					return
+				}
+				for rows.Next() {
+					var seat string
+					if err := rows.Scan(&seat); err != nil {
+						_ = rows.Close()
+						c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca seat: " + err.Error()})
+						return
+					}
+
+					ph := strings.TrimSpace(b.Phone)
+					if ph == "" {
+						ph = phoneStr
+					}
+
+					passengers = append(passengers, SuratJalanPassenger{
+						Seat:            strings.ToUpper(strings.TrimSpace(seat)),
+						Name:            "",
+						Phone:           ph,
+						PickupLocation:  strings.TrimSpace(b.Pickup),
+						DropoffLocation: strings.TrimSpace(b.Dropoff),
+						Fare:            b.PricePerSeat,
+						Status:          strings.TrimSpace(b.PaymentStatus),
+						BookingID:       b.ID,
+					})
+				}
+				_ = rows.Close()
+			}
+		}
+
+		c.JSON(http.StatusOK, RegulerSuratJalanResponse{
+			BookingID:       id64, // booking yg diminta, tetapi isi passenger gabungan
+			RouteFrom:       routeFrom,
+			RouteTo:         routeTo,
+			TripDate:        tripDate,
+			TripTime:        tripTime,
+			PickupLocation:  "", // gabungan → per penumpang
+			DropoffLocation: "",
+			PricePerSeat:    0,
+			Total:           sumTotal,
+			PassengerPhone:  "",
+			PaymentStatus:   "",
+			Passengers:      passengers,
+			Scope:           "trip",
+			TripBookingCount: len(bookings),
+		})
+		return
+	}
+
+	// ======================================================
+	// ✅ MODE LAMA (1 booking saja)
+	// ======================================================
+
 	passengers := []SuratJalanPassenger{}
 
 	// ---- ambil dari booking_passengers ----
 	if hasTable(config.DB, "booking_passengers") {
 		order := bestOrderBy(config.DB, "booking_passengers")
+
+		// ✅ NEW: kalau ada passenger_phone per penumpang, ikut ambil
+		withPassengerPhone := hasColumn(config.DB, "booking_passengers", "passenger_phone")
+
 		q := `
 			SELECT seat_code, passenger_name
 			FROM booking_passengers
 			WHERE booking_id = ?
 		`
+		if withPassengerPhone {
+			q = `
+				SELECT seat_code, passenger_name, passenger_phone
+				FROM booking_passengers
+				WHERE booking_id = ?
+			`
+		}
+
 		if order != "" {
 			q += " ORDER BY " + order
 		}
@@ -804,13 +1111,29 @@ func GetRegulerSuratJalan(c *gin.Context) {
 
 		for rows.Next() {
 			var seat, name string
-			if err := rows.Scan(&seat, &name); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca data penumpang: " + err.Error()})
-				return
+			var pphone sql.NullString
+
+			if withPassengerPhone {
+				if err := rows.Scan(&seat, &name, &pphone); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca data penumpang: " + err.Error()})
+					return
+				}
+			} else {
+				if err := rows.Scan(&seat, &name); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal membaca data penumpang: " + err.Error()})
+					return
+				}
 			}
+
+			ph := phoneStr
+			if pphone.Valid && strings.TrimSpace(pphone.String) != "" {
+				ph = strings.TrimSpace(pphone.String)
+			}
+
 			passengers = append(passengers, SuratJalanPassenger{
-				Seat: strings.ToUpper(strings.TrimSpace(seat)),
-				Name: strings.TrimSpace(name),
+				Seat:  strings.ToUpper(strings.TrimSpace(seat)),
+				Name:  strings.TrimSpace(name),
+				Phone: ph,
 			})
 		}
 		if err := rows.Err(); err != nil {
@@ -845,8 +1168,9 @@ func GetRegulerSuratJalan(c *gin.Context) {
 				return
 			}
 			passengers = append(passengers, SuratJalanPassenger{
-				Seat: strings.ToUpper(strings.TrimSpace(seat)),
-				Name: "",
+				Seat:  strings.ToUpper(strings.TrimSpace(seat)),
+				Name:  "",
+				Phone: phoneStr,
 			})
 		}
 	}
@@ -862,6 +1186,8 @@ func GetRegulerSuratJalan(c *gin.Context) {
 		PricePerSeat:    pricePerSeat,
 		Total:           total,
 		PassengerPhone:  phoneStr,
+		PaymentStatus:   paymentStatus,
 		Passengers:      passengers,
+		Scope:           "booking",
 	})
 }

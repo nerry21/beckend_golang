@@ -389,9 +389,14 @@ func autoTripNumber(date, timeStr, from, to string) string {
 	========================================================
 */
 
-// Link E-Surat Jalan memang sudah ada endpoint API
+// Link E-Surat Jalan memang sudah ada endpoint API (mode lama)
 func buildSuratJalanAPI(bookingID int64) string {
 	return fmt.Sprintf("/api/reguler/bookings/%d/surat-jalan", bookingID)
+}
+
+// ✅ NEW: Link E-Surat Jalan mode gabungan per trip (route+date+time sama)
+func buildSuratJalanAPITrip(bookingID int64) string {
+	return fmt.Sprintf("/api/reguler/bookings/%d/surat-jalan?scope=trip", bookingID)
 }
 
 // "Hint" untuk frontend agar bisa membuka invoice/e-ticket dari bookingId.
@@ -417,7 +422,7 @@ type syncNotes struct {
 func buildSyncNotesJSON(bookingID int64) string {
 	n := syncNotes{
 		BookingID:          bookingID,
-		SuratJalanAPI:      buildSuratJalanAPI(bookingID),
+		SuratJalanAPI:      buildSuratJalanAPITrip(bookingID), // ✅ FIX: selalu simpan mode gabungan
 		ETicketInvoiceHint: buildTicketInvoiceHint(bookingID),
 		BookingHint:        buildBookingHint(bookingID),
 	}
@@ -468,7 +473,7 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 
 func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	tripNo := autoTripNumber(p.Date, p.Time, p.From, p.To)
-	esuratURL := buildSuratJalanAPI(p.BookingID)
+	esuratURL := buildSuratJalanAPITrip(p.BookingID) // ✅ FIX: gabungan trip
 
 	var existingID int64
 	_ = tx.QueryRow(`SELECT id FROM trip_information WHERE trip_number=? LIMIT 1`, tripNo).Scan(&existingID)
@@ -666,7 +671,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 		totalStr := fmt.Sprintf("%d", p.TotalAmount)
 		notes := fmt.Sprintf("Auto sync dari booking %d. Lihat E-Ticket/Invoice di halaman booking.", p.BookingID)
 
-		// ✅ TAMBAHAN: simpan JSON hint agar PassengerInfo.jsx bisa tampilkan tombol buka E-ticket/Invoice dan surat jalan
+		// ✅ simpan JSON hint agar PassengerInfo.jsx bisa tampilkan tombol buka E-ticket/Invoice dan surat jalan
 		syncJSON := buildSyncNotesJSON(p.BookingID)
 
 		if existingID > 0 {
@@ -721,10 +726,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 				args = append(args, p.Category)
 			}
 
-			// ✅ FIX: kirim marker E-Ticket+Invoice dari booking ke data penumpang
-			// Tujuannya: kolom E-Ticket di PassengerInfo langsung bisa dibuka (tanpa reload/new tab)
-			// dan menampilkan E-Ticket + Invoice dari booking yang sudah lunas.
-			// Catatan: ini hanya untuk E-Ticket/Invoice. Surat jalan tetap ada di Trip Information.
+			// E-Ticket+Invoice marker
 			if hasColumn(tx, "passengers", "eticket_photo") {
 				sets = append(sets, "eticket_photo=?")
 				args = append(args, buildTicketInvoiceHint(p.BookingID))
@@ -736,7 +738,6 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			}
 
 			if hasColumn(tx, "passengers", "notes") {
-				// ✅ TAMBAHAN: jangan hilangkan notes lama
 				var existingNotes sql.NullString
 				_ = tx.QueryRow(`SELECT COALESCE(notes,'') FROM passengers WHERE id=? LIMIT 1`, existingID).Scan(&existingNotes)
 				merged := notes
@@ -750,7 +751,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 				args = append(args, merged)
 			}
 
-			// ✅ TAMBAHAN: kalau ada kolom khusus untuk simpan hint/url
+			// ✅ kolom hint/url kalau ada
 			if hasColumn(tx, "passengers", "booking_hint") {
 				sets = append(sets, "booking_hint=?")
 				args = append(args, buildBookingHint(p.BookingID))
@@ -761,7 +762,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			}
 			if hasColumn(tx, "passengers", "surat_jalan_api") {
 				sets = append(sets, "surat_jalan_api=?")
-				args = append(args, buildSuratJalanAPI(p.BookingID))
+				args = append(args, buildSuratJalanAPITrip(p.BookingID)) // ✅ FIX
 			}
 
 			if hasColumn(tx, "passengers", "updated_at") {
@@ -837,16 +838,13 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.Category)
 		}
 
-		// ✅ FIX: E-Ticket+Invoice harus ikut tersimpan ke data penumpang setelah booking sukses/lunas.
-		// Isi dengan marker yang akan dibaca PassengerInfo.jsx.
-		// (Bukan surat jalan. Surat jalan tetap disimpan di Trip Information.)
+		// E-Ticket+Invoice marker
 		if hasColumn(tx, "passengers", "eticket_photo") {
 			cols = append(cols, "eticket_photo")
 			vals = append(vals, buildTicketInvoiceHint(p.BookingID))
 		}
 
 		if hasColumn(tx, "passengers", "notes") {
-			// ✅ TAMBAHAN: gabungkan notes dengan sync json hint
 			cols = append(cols, "notes")
 			vals = append(vals, notes+"\n"+syncJSON)
 		}
@@ -856,7 +854,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.BookingID)
 		}
 
-		// ✅ TAMBAHAN: kolom hint/url kalau ada
+		// ✅ kolom hint/url kalau ada
 		if hasColumn(tx, "passengers", "booking_hint") {
 			cols = append(cols, "booking_hint")
 			vals = append(vals, buildBookingHint(p.BookingID))
@@ -867,7 +865,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 		}
 		if hasColumn(tx, "passengers", "surat_jalan_api") {
 			cols = append(cols, "surat_jalan_api")
-			vals = append(vals, buildSuratJalanAPI(p.BookingID))
+			vals = append(vals, buildSuratJalanAPITrip(p.BookingID)) // ✅ FIX
 		}
 
 		if hasColumn(tx, "passengers", "created_at") {
