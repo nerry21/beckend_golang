@@ -1,14 +1,13 @@
+// backend/handlers/booking_sync.go
 package handlers
 
 import (
 	"backend/config"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
-	"regexp"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -33,35 +32,6 @@ type BookingSyncPayload struct {
 	PaymentMethod string
 	PaymentStatus string
 	CreatedAt     time.Time
-}
-
-// ==============================
-// ✅ MySQL named lock (anti race condition)
-// Tujuan: kalau 2 booking dibayar bersamaan untuk trip yang sama,
-// jangan sampai trip_information ter-insert dobel karena race.
-// Catatan: GET_LOCK hanya ada di MySQL/MariaDB (phpMyAdmin umumnya ini).
-// Kalau DB bukan MySQL, fungsi ini akan error dan kita fallback ke logic biasa.
-// ==============================
-
-func acquireNamedLock(tx *sql.Tx, key string, timeoutSec int) error {
-	if tx == nil || key == "" {
-		return errors.New("acquireNamedLock: invalid args")
-	}
-	var got sql.NullInt64
-	if err := tx.QueryRow(`SELECT GET_LOCK(?, ?)`, key, timeoutSec).Scan(&got); err != nil {
-		return err
-	}
-	if !got.Valid || got.Int64 != 1 {
-		return fmt.Errorf("acquireNamedLock: cannot get lock %s", key)
-	}
-	return nil
-}
-
-func releaseNamedLock(tx *sql.Tx, key string) {
-	if tx == nil || key == "" {
-		return
-	}
-	_, _ = tx.Exec(`SELECT RELEASE_LOCK(?)`, key)
 }
 
 // ✅ kompatibel dengan call site lama: SyncConfirmedRegulerBooking(tx, bookingID)
@@ -125,16 +95,17 @@ func isPaidSuccess(paymentStatus, paymentMethod string) bool {
 	s := strings.ToLower(strings.TrimSpace(paymentStatus))
 	m := strings.ToLower(strings.TrimSpace(paymentMethod))
 
-	// cash biasanya langsung dianggap sukses
-	if m == "cash" && (s == "" || s == "sukses" || s == "lunas" || s == "paid") {
-		return true
+	switch m {
+	case "cash":
+		return s == "" || s == "sukses" || s == "lunas" || s == "paid"
+	default:
+		switch s {
+		case "sukses", "lunas", "paid":
+			return true
+		default:
+			return false
+		}
 	}
-
-	// transfer/qris harus sukses/lunas
-	if s == "sukses" || s == "lunas" || s == "paid" {
-		return true
-	}
-	return false
 }
 
 // ===== internal =====
@@ -324,9 +295,8 @@ func readBookingPayload(tx *sql.Tx, bookingID int64) (BookingSyncPayload, error)
 		Category:  strings.TrimSpace(category.String),
 		From:      strings.TrimSpace(fromC.String),
 		To:        strings.TrimSpace(toC.String),
-		// ✅ NORMALIZE: supaya trip_information tidak dobel
-		Date:      normalizeTripDate(tripDate.String),
-		Time:      normalizeTripTime(tripTime.String),
+		Date:      normalizeTripDate(strings.TrimSpace(tripDate.String)),
+		Time:      normalizeTripTime(strings.TrimSpace(tripTime.String)),
 
 		PickupLocation:  strings.TrimSpace(pickup.String),
 		DropoffLocation: strings.TrimSpace(dropoff.String),
@@ -378,23 +348,6 @@ func parseSeatsFlexible(raw string) []string {
 	return seats
 }
 
-// ==============================
-// ✅ NORMALIZER (anti duplikat trip)
-// - trip_date kadang tersimpan sebagai DATETIME / RFC3339 (contoh: 2025-12-22T00:00:00Z)
-// - trip_time kadang tersimpan sebagai "08:00 WIB" / "08:00:00" / dll
-// Tujuan: kunci trip (trip_number) selalu konsisten agar upsert tidak bikin baris ganda.
-// ==============================
-
-func normalizeFromTo(s string) string {
-	// untuk membuat trip_number stabil
-	x := strings.ToUpper(strings.TrimSpace(s))
-	x = strings.ReplaceAll(x, "  ", " ")
-	x = strings.ReplaceAll(x, " ", "")
-	x = strings.ReplaceAll(x, "/", "-")
-	x = strings.ReplaceAll(x, "\\", "-")
-	return x
-}
-
 func normalizeSeatsUnique(seats []string) []string {
 	out := make([]string, 0, len(seats))
 	seen := map[string]bool{}
@@ -411,74 +364,81 @@ func normalizeSeatsUnique(seats []string) []string {
 	return out
 }
 
-// normalizeTripDate memastikan nilai tanggal konsisten "YYYY-MM-DD".
-// Ini penting supaya trip_number stabil dan trip_information tidak double untuk booking yang sama.
-func normalizeTripDate(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+func normalizeTripDate(date string) string {
+	date = strings.TrimSpace(date)
+	if date == "" {
 		return ""
 	}
-
-	// kalau sudah ada prefix YYYY-MM-DD, ambil 10 char pertama
-	if len(s) >= 10 {
-		prefix := s[:10]
-		if _, err := time.Parse("2006-01-02", prefix); err == nil {
-			return prefix
+	// sudah yyyy-mm-dd
+	if len(date) == 10 && strings.Count(date, "-") == 2 {
+		return date
+	}
+	// dd-mm-yyyy atau dd/mm/yyyy -> yyyy-mm-dd
+	d := strings.ReplaceAll(date, "/", "-")
+	parts := strings.Split(d, "-")
+	if len(parts) == 3 {
+		// jika part pertama 2 digit dan part ketiga 4 digit => dd-mm-yyyy
+		if len(parts[0]) <= 2 && len(parts[2]) == 4 {
+			dd := fmt.Sprintf("%02s", strings.TrimSpace(parts[0]))
+			mm := fmt.Sprintf("%02s", strings.TrimSpace(parts[1]))
+			yy := strings.TrimSpace(parts[2])
+			dd = strings.ReplaceAll(dd, " ", "0")
+			mm = strings.ReplaceAll(mm, " ", "0")
+			return fmt.Sprintf("%s-%s-%s", yy, mm, dd)
 		}
 	}
-
-	// coba parse RFC3339
-	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t.Format("2006-01-02")
-	}
-
-	// coba layout umum MySQL DATETIME
-	layouts := []string{
-		"2006-01-02 15:04:05",
-		"2006-01-02 15:04",
-		"02-01-2006",
-		"02/01/2006",
-	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.Format("2006-01-02")
-		}
-	}
-
-	return s
+	return date
 }
 
-// normalizeTripTime mengubah berbagai format time ("08:00 WIB", "08:00:00") menjadi "HH:mm".
-func normalizeTripTime(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
+func normalizeTripTime(t string) string {
+	t = strings.TrimSpace(t)
+	if t == "" {
 		return ""
 	}
-	re := regexp.MustCompile(`\b(\d{2}):(\d{2})\b`)
-	m := re.FindStringSubmatch(s)
-	if len(m) >= 3 {
-		hhmm := m[0]
-		if _, err := time.Parse("15:04", hhmm); err == nil {
-			return hhmm
+	// jika "8" -> "08:00"
+	if onlyDigits(t) {
+		if len(t) <= 2 {
+			h, _ := strconv.Atoi(t)
+			return fmt.Sprintf("%02d:00", h)
 		}
 	}
-	return s
+	// jika "8:5" -> "08:05"
+	if strings.Contains(t, ":") {
+		ps := strings.Split(t, ":")
+		if len(ps) >= 2 {
+			h, _ := strconv.Atoi(strings.TrimSpace(ps[0]))
+			m, _ := strconv.Atoi(strings.TrimSpace(ps[1]))
+			return fmt.Sprintf("%02d:%02d", h, m)
+		}
+	}
+	return t
+}
+
+func onlyDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func autoTripNumber(date, timeStr, from, to string) string {
-	// ✅ pastikan kunci trip stabil
-	date = normalizeTripDate(date)
-	timeStr = normalizeTripTime(timeStr)
-
 	norm := func(s string) string {
-		return normalizeFromTo(s)
+		s = strings.ToUpper(strings.TrimSpace(s))
+		s = strings.ReplaceAll(s, " ", "")
+		s = strings.ReplaceAll(s, "/", "-")
+		s = strings.ReplaceAll(s, "\\", "-")
+		return s
 	}
-
-	dd := strings.ReplaceAll(strings.TrimSpace(date), "-", "")
+	dd := strings.ReplaceAll(strings.TrimSpace(normalizeTripDate(date)), "-", "")
 	if dd == "" {
 		dd = time.Now().Format("20060102")
 	}
-	tt := strings.TrimSpace(timeStr)
+	tt := norm(normalizeTripTime(timeStr))
 	if tt == "" {
 		tt = "00:00"
 	}
@@ -494,21 +454,23 @@ func autoTripNumber(date, timeStr, from, to string) string {
 	========================================================
 */
 
-// Link E-Surat Jalan memang sudah ada endpoint API
+// Link E-Surat Jalan booking (⚠️ ini outputnya JSON penumpang)
 func buildSuratJalanAPI(bookingID int64) string {
 	return fmt.Sprintf("/api/reguler/bookings/%d/surat-jalan", bookingID)
 }
 
+// ✅ INI YANG DIPAKAI untuk tampil seperti Informasi 10:
+// gunakan endpoint surat-jalan milik Trip Information (preview file/image)
+func buildTripInformationSuratJalanAPI(tripInformationID int64) string {
+	return fmt.Sprintf("/api/trip-information/%d/surat-jalan", tripInformationID)
+}
+
 // "Hint" untuk frontend agar bisa membuka invoice/e-ticket dari bookingId.
-// Kalau di frontend route kamu berbeda, tinggal pakai bookingId dari notes.
 func buildBookingHint(bookingID int64) string {
-	// opsi aman: simpan bookingId saja; frontend yang bentuk URL
 	return fmt.Sprintf("BOOKING_ID:%d", bookingID)
 }
 
 func buildTicketInvoiceHint(bookingID int64) string {
-	// Disarankan dipakai PassengerInfo.jsx untuk tombol:
-	// navigate(`/reguler?bookingId=${bookingID}`) atau route yang kamu pakai.
 	return fmt.Sprintf("ETICKET_INVOICE_FROM_BOOKING:%d", bookingID)
 }
 
@@ -548,7 +510,6 @@ func mergeNotes(existing string, bookingID int64) string {
 	}
 
 	// kalau notes sudah ada teks lain, jangan hilangkan:
-	// append dengan separator yang aman
 	return existing + "\n" + newJSON
 }
 
@@ -567,10 +528,10 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 		}
 	}
 
-	// 3) PENGATURAN KEBERANGKATAN (departure_settings) + e-surat jalan
-	// ✅ 1 trip (tanggal+jam+rute) = 1 baris, jadi tidak dobel per booking
+	// 3) PENGATURAN KEBERANGKATAN (departure_settings)
+	// ✅ TAMBAHAN: agar setelah booking lunas, otomatis muncul di menu Pengaturan Keberangkatan
 	if hasTable(tx, "departure_settings") {
-		if err := upsertDepartureSettingsTrip(tx, p); err != nil {
+		if err := upsertDepartureSettings(tx, p); err != nil {
 			return err
 		}
 	}
@@ -581,30 +542,14 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 
 func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	tripNo := autoTripNumber(p.Date, p.Time, p.From, p.To)
+
+	// tetap simpan e_surat_jalan minimal (fallback) dari booking endpoint
+	// (nanti frontend TripInformation bisa memanggil /api/trip-information/:id/surat-jalan untuk preview file asli)
 	esuratURL := buildSuratJalanAPI(p.BookingID)
 
-	// ✅ agregasi kursi & jumlah penumpang untuk 1 trip (tanggal+jam+rute)
-	allSeats, paxCount := aggregateTripSeatsAndCount(tx, p)
-	if paxCount <= 0 {
-		paxCount = len(p.SelectedSeats)
-		allSeats = p.SelectedSeats
-	}
-	seatsCSV := formatSeatsCSV(allSeats)
-
-	// ✅ anti dobel: lock berdasarkan tripNo
-	lockKey := "trip_information:" + tripNo
-	if err := acquireNamedLock(tx, lockKey, 5); err == nil {
-		defer releaseNamedLock(tx, lockKey)
-	} else {
-		// bukan error fatal; tetap jalan dengan best-effort
-		log.Println("[SYNC] warning: cannot acquire named lock:", err)
-	}
-
 	var existingID int64
-	// ambil record terbaru jika (sudah terlanjur) ada duplikat
-	_ = tx.QueryRow(`SELECT id FROM trip_information WHERE trip_number=? ORDER BY id DESC LIMIT 1`, tripNo).Scan(&existingID)
+	_ = tx.QueryRow(`SELECT id FROM trip_information WHERE trip_number=? LIMIT 1`, tripNo).Scan(&existingID)
 
-	// kolom bisa beda2, update/insert dinamis
 	if existingID > 0 {
 		sets := []string{}
 		args := []any{}
@@ -622,7 +567,7 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 			args = append(args, esuratURL)
 		}
 
-		// ✅ TAMBAHAN (tanpa menghapus yang lama)
+		// tambahan
 		if hasColumn(tx, "trip_information", "route_from") {
 			sets = append(sets, "route_from=?")
 			args = append(args, p.From)
@@ -637,11 +582,7 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 		}
 		if hasColumn(tx, "trip_information", "passenger_count") {
 			sets = append(sets, "passenger_count=?")
-			args = append(args, int64(paxCount))
-		}
-		if hasColumn(tx, "trip_information", "seat_numbers") {
-			sets = append(sets, "seat_numbers=?")
-			args = append(args, seatsCSV)
+			args = append(args, int64(len(p.SelectedSeats)))
 		}
 		if hasColumn(tx, "trip_information", "updated_at") {
 			sets = append(sets, "updated_at=?")
@@ -660,7 +601,6 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	cols := []string{"trip_number"}
 	vals := []any{tripNo}
 
-	// isi minimal (biarkan kosong untuk diatur admin)
 	if hasColumn(tx, "trip_information", "departure_date") {
 		cols = append(cols, "departure_date")
 		vals = append(vals, p.Date)
@@ -686,7 +626,7 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 		vals = append(vals, esuratURL)
 	}
 
-	// ✅ TAMBAHAN (tanpa menghapus yang lama)
+	// tambahan
 	if hasColumn(tx, "trip_information", "route_from") {
 		cols = append(cols, "route_from")
 		vals = append(vals, p.From)
@@ -701,11 +641,7 @@ func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
 	}
 	if hasColumn(tx, "trip_information", "passenger_count") {
 		cols = append(cols, "passenger_count")
-		vals = append(vals, int64(paxCount))
-	}
-	if hasColumn(tx, "trip_information", "seat_numbers") {
-		cols = append(cols, "seat_numbers")
-		vals = append(vals, seatsCSV)
+		vals = append(vals, int64(len(p.SelectedSeats)))
 	}
 	if hasColumn(tx, "trip_information", "created_at") {
 		cols = append(cols, "created_at")
@@ -804,8 +740,6 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 
 		totalStr := fmt.Sprintf("%d", p.TotalAmount)
 		notes := fmt.Sprintf("Auto sync dari booking %d. Lihat E-Ticket/Invoice di halaman booking.", p.BookingID)
-
-		// ✅ TAMBAHAN: simpan JSON hint agar PassengerInfo.jsx bisa tampilkan tombol buka E-ticket/Invoice dan surat jalan
 		syncJSON := buildSyncNotesJSON(p.BookingID)
 
 		if existingID > 0 {
@@ -866,21 +800,20 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			}
 
 			if hasColumn(tx, "passengers", "notes") {
-				// ✅ TAMBAHAN: jangan hilangkan notes lama
+				// ✅ jangan hilangkan notes lama
 				var existingNotes sql.NullString
 				_ = tx.QueryRow(`SELECT COALESCE(notes,'') FROM passengers WHERE id=? LIMIT 1`, existingID).Scan(&existingNotes)
-				merged := notes
-				if existingNotes.Valid {
+
+				merged := notes + "\n" + syncJSON
+				if existingNotes.Valid && strings.TrimSpace(existingNotes.String) != "" {
 					merged = mergeNotes(existingNotes.String, p.BookingID)
-				} else {
-					merged = notes + "\n" + syncJSON
 				}
 
 				sets = append(sets, "notes=?")
 				args = append(args, merged)
 			}
 
-			// ✅ TAMBAHAN: kalau ada kolom khusus untuk simpan hint/url
+			// optional kolom hint
 			if hasColumn(tx, "passengers", "booking_hint") {
 				sets = append(sets, "booking_hint=?")
 				args = append(args, buildBookingHint(p.BookingID))
@@ -967,14 +900,12 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.Category)
 		}
 
-		// e-ticket: kalau kolomnya ada, isi minimal marker (biar UI bisa tampilkan link/btn)
 		if hasColumn(tx, "passengers", "eticket_photo") {
 			cols = append(cols, "eticket_photo")
-			vals = append(vals, "") // (opsional) kalau nanti ada endpoint e-ticket, bisa isi URL/base64 di sini
+			vals = append(vals, "")
 		}
 
 		if hasColumn(tx, "passengers", "notes") {
-			// ✅ TAMBAHAN: gabungkan notes dengan sync json hint
 			cols = append(cols, "notes")
 			vals = append(vals, notes+"\n"+syncJSON)
 		}
@@ -984,7 +915,7 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 			vals = append(vals, p.BookingID)
 		}
 
-		// ✅ TAMBAHAN: kolom hint/url kalau ada
+		// optional kolom hint
 		if hasColumn(tx, "passengers", "booking_hint") {
 			cols = append(cols, "booking_hint")
 			vals = append(vals, buildBookingHint(p.BookingID))
@@ -1021,242 +952,124 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 	return nil
 }
 
+/*
+	========================================================
+	✅ TAMBAHAN (TIDAK MENGHAPUS KODE LAMA):
+	Sync ke tabel departure_settings supaya:
+	- Booking yang sudah lunas otomatis tampil di Pengaturan Keberangkatan
+	- E-Surat Jalan tampil seperti Informasi 10 (via /api/trip-information/:id/surat-jalan)
+	- Data pemesan/penumpang ikut tersimpan (jika kolom tersedia)
+	========================================================
+*/
 
-// ========================================================
-// ✅ TAMBAHAN (TIDAK MENGHAPUS KODE LAMA)
-// Sinkronisasi ke tabel departure_settings (Pengaturan Keberangkatan)
-// - 1 trip (tanggal+jam+rute) = 1 baris (tidak dobel per booking)
-// - seat_numbers & passenger_count di-aggregate dari semua booking yang "paid/sukses"
-// - surat_jalan_file otomatis mengarah ke e-surat-jalan dari booking/trip
-// ========================================================
-
-// formatSeatsCSV: rapikan seat menjadi "1A, 2B, 5A"
-func formatSeatsCSV(seats []string) string {
-	seats = normalizeSeatsUnique(seats)
-	sort.Strings(seats)
-	return strings.Join(seats, ", ")
+func joinSeatsForDB(seats []string) string {
+	if len(seats) == 0 {
+		return ""
+	}
+	return strings.Join(normalizeSeatsUnique(seats), ", ")
 }
 
-// aggregateTripSeatsAndCount: ambil semua seat dari booking yang sesuai trip (date+time+from+to+category)
-// lalu gabungkan menjadi unique seats, return (seats, count).
-func aggregateTripSeatsAndCount(tx *sql.Tx, p BookingSyncPayload) ([]string, int) {
-	if tx == nil {
-		return p.SelectedSeats, len(p.SelectedSeats)
+// build string daftar penumpang dari booking_passengers (kalau ada)
+// format:
+//  1A - Nerry
+//  1B - Budi
+func buildPassengerListText(tx *sql.Tx, bookingID int64) string {
+	if bookingID <= 0 {
+		return ""
+	}
+	if !hasTable(tx, "booking_passengers") {
+		return ""
+	}
+	if !hasColumn(tx, "booking_passengers", "booking_id") || !hasColumn(tx, "booking_passengers", "seat_code") {
+		return ""
+	}
+	if !hasColumn(tx, "booking_passengers", "passenger_name") {
+		return ""
 	}
 
-	// deteksi tabel booking
-	table := "bookings"
-	if !hasTable(tx, table) {
-		if hasTable(tx, "reguler_bookings") {
-			table = "reguler_bookings"
-		}
-	}
-
-	// cari kolom-kolom yang tersedia
-	dateCol := "trip_date"
-	if !hasColumn(tx, table, dateCol) {
-		if hasColumn(tx, table, "departure_date") {
-			dateCol = "departure_date"
-		}
-	}
-	timeCol := "trip_time"
-	if !hasColumn(tx, table, timeCol) {
-		if hasColumn(tx, table, "departure_time") {
-			timeCol = "departure_time"
-		}
-	}
-
-	fromCol := "from_city"
-	if !hasColumn(tx, table, fromCol) {
-		if hasColumn(tx, table, "route_from") {
-			fromCol = "route_from"
-		}
-	}
-	toCol := "to_city"
-	if !hasColumn(tx, table, toCol) {
-		if hasColumn(tx, table, "route_to") {
-			toCol = "route_to"
-		}
-	}
-
-	categoryCol := "category"
-	if !hasColumn(tx, table, categoryCol) {
-		categoryCol = ""
-	}
-
-	statusCol := "payment_status"
-	if !hasColumn(tx, table, statusCol) {
-		statusCol = ""
-	}
-	methodCol := "payment_method"
-	if !hasColumn(tx, table, methodCol) {
-		methodCol = ""
-	}
-
-	seatCol := ""
-	for _, c := range []string{"selected_seats_json", "seats_json", "selected_seats", "seat_numbers"} {
-		if hasColumn(tx, table, c) {
-			seatCol = c
-			break
-		}
-	}
-	if seatCol == "" || dateCol == "" || timeCol == "" || fromCol == "" || toCol == "" {
-		return p.SelectedSeats, len(p.SelectedSeats)
-	}
-
-	// query semua booking yang match trip ini (filternya fleksibel untuk date/time yang kadang berupa datetime/RFC3339)
-	q := fmt.Sprintf(`
-		SELECT
-			COALESCE(%s,'') AS seats_raw,
-			COALESCE(%s,'') AS pay_status,
-			COALESCE(%s,'') AS pay_method
-		FROM %s
-		WHERE
-			(%s = ? OR %s LIKE CONCAT(?, '%%'))
-			AND (%s = ? OR %s LIKE CONCAT(?, '%%'))
-			AND COALESCE(%s,'') = ?
-			AND COALESCE(%s,'') = ?`,
-		seatCol,
-		// status/method bisa kosong; kalau kolomnya tidak ada kita pakai '' (sudah di atas)
-		func() string {
-			if statusCol == "" {
-				return "''"
-			}
-			return statusCol
-		}(),
-		func() string {
-			if methodCol == "" {
-				return "''"
-			}
-			return methodCol
-		}(),
-		table,
-		dateCol, dateCol,
-		timeCol, timeCol,
-		fromCol,
-		toCol,
-	)
-
-	args := []any{p.Date, p.Date, p.Time, p.Time, p.From, p.To}
-
-	// optional kategori
-	if categoryCol != "" {
-		q += fmt.Sprintf(` AND COALESCE(%s,'') = ?`, categoryCol)
-		args = append(args, p.Category)
-	}
-
-	rows, err := tx.Query(q, args...)
+	rows, err := tx.Query(`SELECT COALESCE(seat_code,''), COALESCE(passenger_name,'') FROM booking_passengers WHERE booking_id=? ORDER BY seat_code ASC`, bookingID)
 	if err != nil {
-		// best effort
-		return p.SelectedSeats, len(p.SelectedSeats)
+		return ""
 	}
 	defer rows.Close()
 
-	seen := map[string]bool{}
-	out := make([]string, 0, 8)
-
+	var lines []string
 	for rows.Next() {
-		var seatsRaw, ps, pm sql.NullString
-		if err := rows.Scan(&seatsRaw, &ps, &pm); err != nil {
+		var seat, name string
+		_ = rows.Scan(&seat, &name)
+		seat = strings.ToUpper(strings.TrimSpace(seat))
+		name = strings.TrimSpace(name)
+		if seat == "" && name == "" {
 			continue
 		}
-
-		if !isPaidSuccess(ps.String, pm.String) {
-			continue
-		}
-
-		seats := parseSeatsFlexible(seatsRaw.String)
-		for _, s := range normalizeSeatsUnique(seats) {
-			if s == "" {
-				continue
-			}
-			if !seen[s] {
-				seen[s] = true
-				out = append(out, s)
-			}
+		if seat == "" {
+			lines = append(lines, name)
+		} else if name == "" {
+			lines = append(lines, seat)
+		} else {
+			lines = append(lines, fmt.Sprintf("%s - %s", seat, name))
 		}
 	}
-
-	out = normalizeSeatsUnique(out)
-	sort.Strings(out)
-	return out, len(out)
+	return strings.Join(lines, "\n")
 }
 
-// getTripESuratJalan: ambil e_surat_jalan dari trip_information berdasarkan trip_number (jika ada)
-func getTripESuratJalan(tx *sql.Tx, tripNo string) string {
-	if tx == nil || tripNo == "" {
-		return ""
+// ✅ ambil ID trip_information berdasarkan trip_number
+func findTripInformationID(tx *sql.Tx, tripNo string) int64 {
+	if strings.TrimSpace(tripNo) == "" {
+		return 0
 	}
-	if !hasTable(tx, "trip_information") || !hasColumn(tx, "trip_information", "e_surat_jalan") {
-		return ""
+	if !hasTable(tx, "trip_information") {
+		return 0
 	}
-	var s sql.NullString
-	_ = tx.QueryRow(`SELECT COALESCE(e_surat_jalan,'') FROM trip_information WHERE trip_number=? ORDER BY id DESC LIMIT 1`, tripNo).Scan(&s)
-	return strings.TrimSpace(s.String)
+	var id int64
+	_ = tx.QueryRow(`SELECT id FROM trip_information WHERE trip_number=? LIMIT 1`, tripNo).Scan(&id)
+	return id
 }
 
-// upsertDepartureSettingsTrip: 1 trip = 1 row (tidak dobel per booking)
-func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
-	if tx == nil {
-		return nil
+// ✅ Tentukan URL surat jalan untuk departure_settings:
+// - prioritas: /api/trip-information/:id/surat-jalan  (hasilnya seperti Informasi 10)
+// - fallback: /api/reguler/bookings/:id/surat-jalan?scope=trip (JSON)
+func buildDepartureSuratJalanURL(tx *sql.Tx, p BookingSyncPayload) (string, string) {
+	tripNo := autoTripNumber(p.Date, p.Time, p.From, p.To)
+	tripID := findTripInformationID(tx, tripNo)
+	if tripID > 0 {
+		return buildTripInformationSuratJalanAPI(tripID), fmt.Sprintf("SuratJalan-TRIP-%d", tripID)
 	}
+	// fallback lama
+	return buildSuratJalanAPI(p.BookingID) + "?scope=trip", fmt.Sprintf("SuratJalan-BOOKING-%d", p.BookingID)
+}
 
+func upsertDepartureSettings(tx *sql.Tx, p BookingSyncPayload) error {
 	table := "departure_settings"
 	if !hasTable(tx, table) {
 		return nil
 	}
 
-	tripNo := autoTripNumber(p.Date, p.Time, p.From, p.To)
-
-	// ✅ named lock untuk mencegah race (2 booking dibayar bersamaan)
-	lockKey := "departure_settings:" + tripNo
-	if err := acquireNamedLock(tx, lockKey, 5); err == nil {
-		defer releaseNamedLock(tx, lockKey)
-	} else {
-		log.Println("[SYNC] warning: cannot acquire named lock for departure_settings:", err)
-	}
-
-	// agregasi seat & pax untuk trip ini
-	allSeats, paxCount := aggregateTripSeatsAndCount(tx, p)
-	if paxCount <= 0 {
-		paxCount = len(p.SelectedSeats)
-		allSeats = p.SelectedSeats
-	}
-	seatsCSV := formatSeatsCSV(allSeats)
-
-	// surat jalan: prioritaskan yang sudah ada di trip_information, kalau kosong fallback ke endpoint booking
-	suratURL := strings.TrimSpace(getTripESuratJalan(tx, tripNo))
-	if suratURL == "" {
-		suratURL = buildSuratJalanAPI(p.BookingID)
-	}
-	suratName := "E-Surat-Jalan-" + tripNo + ".png"
-
-	// cari existing row (prioritas trip_number, kalau tidak ada gunakan kombinasi field yang tersedia)
+	// idempotent: pakai booking_id kalau ada
 	var existingID int64
-	if hasColumn(tx, table, "trip_number") {
-		_ = tx.QueryRow(`SELECT id FROM departure_settings WHERE trip_number=? ORDER BY id DESC LIMIT 1`, tripNo).Scan(&existingID)
-	} else if hasColumn(tx, table, "departure_time") && hasColumn(tx, table, "route_from") && hasColumn(tx, table, "route_to") {
-		_ = tx.QueryRow(`SELECT id FROM departure_settings
-			WHERE departure_date=? AND departure_time=? AND route_from=? AND route_to=? AND service_type=?
-			ORDER BY id DESC LIMIT 1`,
-			p.Date, p.Time, p.From, p.To, p.Category,
-		).Scan(&existingID)
-	} else {
-		// fallback minimal: date + category
-		_ = tx.QueryRow(`SELECT id FROM departure_settings
-			WHERE departure_date=? AND service_type=?
-			ORDER BY id DESC LIMIT 1`,
-			p.Date, p.Category,
-		).Scan(&existingID)
+	if hasColumn(tx, table, "booking_id") {
+		_ = tx.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? LIMIT 1`, p.BookingID).Scan(&existingID)
+	} else if hasColumn(tx, table, "reguler_booking_id") {
+		_ = tx.QueryRow(`SELECT id FROM `+table+` WHERE reguler_booking_id=? LIMIT 1`, p.BookingID).Scan(&existingID)
 	}
 
-	// fields dasar dari booking (yang diinginkan user masuk ke Pengaturan Keberangkatan)
-	bookingName := strings.TrimSpace(p.PassengerName)
-	if bookingName == "" {
-		bookingName = "Booking"
+	seatNumbers := joinSeatsForDB(p.SelectedSeats)
+	passengerCount := strconv.Itoa(len(p.SelectedSeats))
+	if passengerCount == "0" {
+		// kalau seat kosong tapi booking_passengers ada, hitung dari sana
+		if hasTable(tx, "booking_passengers") && hasColumn(tx, "booking_passengers", "booking_id") {
+			var cnt int
+			_ = tx.QueryRow(`SELECT COUNT(*) FROM booking_passengers WHERE booking_id=?`, p.BookingID).Scan(&cnt)
+			if cnt > 0 {
+				passengerCount = strconv.Itoa(cnt)
+			}
+		}
 	}
-	phone := strings.TrimSpace(p.PassengerPhone)
-	pickup := strings.TrimSpace(p.PickupLocation)
+
+	passengerListText := buildPassengerListText(tx, p.BookingID)
+
+	// ✅ ini inti perbaikan agar tampil seperti Informasi 10
+	suratURL, suratName := buildDepartureSuratJalanURL(tx, p)
 
 	if existingID > 0 {
 		sets := []string{}
@@ -1264,23 +1077,23 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 
 		if hasColumn(tx, table, "booking_name") {
 			sets = append(sets, "booking_name=?")
-			args = append(args, bookingName)
+			args = append(args, p.PassengerName)
 		}
 		if hasColumn(tx, table, "phone") {
 			sets = append(sets, "phone=?")
-			args = append(args, phone)
+			args = append(args, p.PassengerPhone)
 		}
 		if hasColumn(tx, table, "pickup_address") {
 			sets = append(sets, "pickup_address=?")
-			args = append(args, pickup)
+			args = append(args, p.PickupLocation)
 		}
 		if hasColumn(tx, table, "departure_date") {
 			sets = append(sets, "departure_date=?")
-			args = append(args, nullIfEmpty(p.Date))
+			args = append(args, p.Date)
 		}
 		if hasColumn(tx, table, "departure_time") {
 			sets = append(sets, "departure_time=?")
-			args = append(args, nullIfEmpty(p.Time))
+			args = append(args, p.Time)
 		}
 		if hasColumn(tx, table, "route_from") {
 			sets = append(sets, "route_from=?")
@@ -1290,20 +1103,25 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 			sets = append(sets, "route_to=?")
 			args = append(args, p.To)
 		}
+		if hasColumn(tx, table, "trip_number") {
+			sets = append(sets, "trip_number=?")
+			args = append(args, autoTripNumber(p.Date, p.Time, p.From, p.To))
+		}
+
+		if hasColumn(tx, table, "seat_numbers") {
+			sets = append(sets, "seat_numbers=?")
+			args = append(args, seatNumbers)
+		}
+		if hasColumn(tx, table, "passenger_count") {
+			sets = append(sets, "passenger_count=?")
+			args = append(args, passengerCount)
+		}
 		if hasColumn(tx, table, "service_type") {
 			sets = append(sets, "service_type=?")
 			args = append(args, p.Category)
 		}
 
-		if hasColumn(tx, table, "seat_numbers") {
-			sets = append(sets, "seat_numbers=?")
-			args = append(args, seatsCSV)
-		}
-		if hasColumn(tx, table, "passenger_count") {
-			sets = append(sets, "passenger_count=?")
-			args = append(args, paxCount)
-		}
-
+		// ✅ surat jalan versi trip_information
 		if hasColumn(tx, table, "surat_jalan_file") {
 			sets = append(sets, "surat_jalan_file=?")
 			args = append(args, suratURL)
@@ -1313,15 +1131,15 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 			args = append(args, suratName)
 		}
 
-		// optional: simpan trip_number & booking_id untuk referensi
-		if hasColumn(tx, table, "trip_number") {
-			sets = append(sets, "trip_number=?")
-			args = append(args, tripNo)
+		// optional: simpan daftar penumpang jika ada kolom
+		for _, col := range []string{"passenger_list", "passenger_names", "passengers", "passenger_details"} {
+			if passengerListText != "" && hasColumn(tx, table, col) {
+				sets = append(sets, col+"=?")
+				args = append(args, passengerListText)
+				break
+			}
 		}
-		if hasColumn(tx, table, "booking_id") {
-			sets = append(sets, "booking_id=?")
-			args = append(args, p.BookingID)
-		}
+
 		if hasColumn(tx, table, "updated_at") {
 			sets = append(sets, "updated_at=?")
 			args = append(args, time.Now())
@@ -1336,29 +1154,28 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 		return err
 	}
 
-	// INSERT baru
 	cols := []string{}
 	vals := []any{}
 
 	if hasColumn(tx, table, "booking_name") {
 		cols = append(cols, "booking_name")
-		vals = append(vals, bookingName)
+		vals = append(vals, p.PassengerName)
 	}
 	if hasColumn(tx, table, "phone") {
 		cols = append(cols, "phone")
-		vals = append(vals, phone)
+		vals = append(vals, p.PassengerPhone)
 	}
 	if hasColumn(tx, table, "pickup_address") {
 		cols = append(cols, "pickup_address")
-		vals = append(vals, pickup)
+		vals = append(vals, p.PickupLocation)
 	}
 	if hasColumn(tx, table, "departure_date") {
 		cols = append(cols, "departure_date")
-		vals = append(vals, nullIfEmpty(p.Date))
+		vals = append(vals, p.Date)
 	}
 	if hasColumn(tx, table, "departure_time") {
 		cols = append(cols, "departure_time")
-		vals = append(vals, nullIfEmpty(p.Time))
+		vals = append(vals, p.Time)
 	}
 	if hasColumn(tx, table, "route_from") {
 		cols = append(cols, "route_from")
@@ -1368,18 +1185,35 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 		cols = append(cols, "route_to")
 		vals = append(vals, p.To)
 	}
+	if hasColumn(tx, table, "trip_number") {
+		cols = append(cols, "trip_number")
+		vals = append(vals, autoTripNumber(p.Date, p.Time, p.From, p.To))
+	}
+
 	if hasColumn(tx, table, "seat_numbers") {
 		cols = append(cols, "seat_numbers")
-		vals = append(vals, seatsCSV)
+		vals = append(vals, seatNumbers)
 	}
 	if hasColumn(tx, table, "passenger_count") {
 		cols = append(cols, "passenger_count")
-		vals = append(vals, paxCount)
+		vals = append(vals, passengerCount)
 	}
 	if hasColumn(tx, table, "service_type") {
 		cols = append(cols, "service_type")
 		vals = append(vals, p.Category)
 	}
+
+	// driver & unit biarkan kosong (nanti diatur admin)
+	if hasColumn(tx, table, "driver_name") {
+		cols = append(cols, "driver_name")
+		vals = append(vals, "")
+	}
+	if hasColumn(tx, table, "vehicle_code") {
+		cols = append(cols, "vehicle_code")
+		vals = append(vals, "")
+	}
+
+	// ✅ surat jalan versi trip_information
 	if hasColumn(tx, table, "surat_jalan_file") {
 		cols = append(cols, "surat_jalan_file")
 		vals = append(vals, suratURL)
@@ -1388,20 +1222,37 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 		cols = append(cols, "surat_jalan_file_name")
 		vals = append(vals, suratName)
 	}
+
+	// optional: simpan daftar penumpang jika ada kolom
+	for _, col := range []string{"passenger_list", "passenger_names", "passengers", "passenger_details"} {
+		if passengerListText != "" && hasColumn(tx, table, col) {
+			cols = append(cols, col)
+			vals = append(vals, passengerListText)
+			break
+		}
+	}
+
+	// status default
 	if hasColumn(tx, table, "departure_status") {
 		cols = append(cols, "departure_status")
 		vals = append(vals, "Berangkat")
 	}
-	if hasColumn(tx, table, "trip_number") {
-		cols = append(cols, "trip_number")
-		vals = append(vals, tripNo)
-	}
+
+	// booking id jika kolom tersedia
 	if hasColumn(tx, table, "booking_id") {
 		cols = append(cols, "booking_id")
 		vals = append(vals, p.BookingID)
+	} else if hasColumn(tx, table, "reguler_booking_id") {
+		cols = append(cols, "reguler_booking_id")
+		vals = append(vals, p.BookingID)
 	}
+
 	if hasColumn(tx, table, "created_at") {
 		cols = append(cols, "created_at")
+		vals = append(vals, time.Now())
+	}
+	if hasColumn(tx, table, "updated_at") {
+		cols = append(cols, "updated_at")
 		vals = append(vals, time.Now())
 	}
 
@@ -1409,10 +1260,11 @@ func upsertDepartureSettingsTrip(tx *sql.Tx, p BookingSyncPayload) error {
 		return nil
 	}
 
-	ph := make([]string, len(cols))
-	for i := range ph {
-		ph[i] = "?"
+	ph := make([]string, 0, len(cols))
+	for range cols {
+		ph = append(ph, "?")
 	}
+
 	_, err := tx.Exec(`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
 	return err
 }

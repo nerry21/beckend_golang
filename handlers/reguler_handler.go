@@ -530,10 +530,11 @@ func CreateRegulerBooking(c *gin.Context) {
 	if paymentMethod != "cash" && paymentMethod != "transfer" && paymentMethod != "qris" {
 		paymentMethod = "" // biar tidak nyimpan value aneh
 	}
-	paymentStatus := ""
-	if paymentMethod == "cash" {
+	var paymentStatus string
+	switch paymentMethod {
+	case "cash":
 		paymentStatus = "Lunas"
-	} else if paymentMethod == "transfer" || paymentMethod == "qris" {
+	case "transfer", "qris":
 		paymentStatus = "Menunggu Validasi"
 	}
 

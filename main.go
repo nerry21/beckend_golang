@@ -194,6 +194,7 @@ func main() {
 		// PENGATURAN KEBERANGKATAN
 		// ============================
 		api.GET("/departure-settings", handlers.GetDepartureSettings)
+		api.GET("/departure-settings/:id", handlers.GetDepartureSettingByID)
 		api.POST("/departure-settings", handlers.CreateDepartureSetting)
 		api.PUT("/departure-settings/:id", handlers.UpdateDepartureSetting)
 		api.DELETE("/departure-settings/:id", handlers.DeleteDepartureSetting)

@@ -28,6 +28,11 @@ type DriverAccount struct {
 
 // GET /api/driver-accounts
 func GetDriverAccounts(c *gin.Context) {
+	if !hasTable(config.DB, "driver_accounts") {
+		c.JSON(http.StatusOK, []DriverAccount{})
+		return
+	}
+
 	rows, err := config.DB.Query(`
 		SELECT
 			id,

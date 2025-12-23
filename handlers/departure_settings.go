@@ -150,6 +150,115 @@ func GetDepartureSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, list)
 }
 
+// GET /api/departure-settings/:id
+func GetDepartureSettingByID(c *gin.Context) {
+	idParam := c.Param("id")
+	id, err := strconv.Atoi(idParam)
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id tidak valid"})
+		return
+	}
+
+	table := "departure_settings"
+	if !hasTable(config.DB, table) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "tabel departure_settings tidak ditemukan"})
+		return
+	}
+
+	tripNoSel := "''"
+	if hasColumn(config.DB, table, "trip_number") {
+		tripNoSel = "COALESCE(trip_number,'')"
+	}
+	bookingIDSel := "0"
+	if hasColumn(config.DB, table, "booking_id") {
+		bookingIDSel = "COALESCE(booking_id,0)"
+	}
+	depTimeSel := "''"
+	if hasColumn(config.DB, table, "departure_time") {
+		depTimeSel = "COALESCE(departure_time,'')"
+	}
+	routeFromSel := "''"
+	if hasColumn(config.DB, table, "route_from") {
+		routeFromSel = "COALESCE(route_from,'')"
+	}
+	routeToSel := "''"
+	if hasColumn(config.DB, table, "route_to") {
+		routeToSel = "COALESCE(route_to,'')"
+	}
+
+	row := config.DB.QueryRow(fmt.Sprintf(`
+		SELECT
+			id,
+			COALESCE(booking_name,''),
+			COALESCE(phone,''),
+			COALESCE(pickup_address,''),
+			COALESCE(departure_date,''),
+			COALESCE(seat_numbers,''),
+			COALESCE(passenger_count, 0),
+			COALESCE(service_type,''),
+			COALESCE(driver_name,''),
+			COALESCE(vehicle_code,''),
+			COALESCE(surat_jalan_file,''),
+			COALESCE(surat_jalan_file_name,''),
+			COALESCE(departure_status,''),
+			COALESCE(created_at,''),
+			%s AS trip_number,
+			%s AS booking_id,
+			%s AS departure_time,
+			%s AS route_from,
+			%s AS route_to
+		FROM %s
+		WHERE id = ?
+		LIMIT 1
+	`, tripNoSel, bookingIDSel, depTimeSel, routeFromSel, routeToSel, table), id)
+
+	var d DepartureSetting
+	var countInt int
+	var bookingID int64
+	if err := row.Scan(
+		&d.ID,
+		&d.BookingName,
+		&d.Phone,
+		&d.PickupAddress,
+		&d.DepartureDate,
+		&d.SeatNumbers,
+		&countInt,
+		&d.ServiceType,
+		&d.DriverName,
+		&d.VehicleCode,
+		&d.SuratJalanFile,
+		&d.SuratJalanFileName,
+		&d.DepartureStatus,
+		&d.CreatedAt,
+		&d.TripNumber,
+		&bookingID,
+		&d.DepartureTime,
+		&d.RouteFrom,
+		&d.RouteTo,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "data tidak ditemukan"})
+			return
+		}
+		log.Println("GetDepartureSettingByID scan error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membaca data: " + err.Error()})
+		return
+	}
+
+	d.BookingID = bookingID
+	d.PassengerCount = strconv.Itoa(countInt)
+
+	if strings.TrimSpace(d.SuratJalanFile) == "" {
+		if s := strings.TrimSpace(getTripESuratJalanDB(config.DB, d.TripNumber)); s != "" {
+			d.SuratJalanFile = s
+		} else if d.BookingID > 0 {
+			d.SuratJalanFile = buildSuratJalanAPI(d.BookingID)
+		}
+	}
+
+	c.JSON(http.StatusOK, d)
+}
+
 // POST /api/departure-settings
 func CreateDepartureSetting(c *gin.Context) {
 	var input DepartureSetting
@@ -275,6 +384,9 @@ func CreateDepartureSetting(c *gin.Context) {
 		_ = config.DB.QueryRow("SELECT COALESCE(created_at, '') FROM "+table+" WHERE id = ? LIMIT 1", id).Scan(&input.CreatedAt)
 	}
 
+	// バ. Sync ke akun driver (best effort, tidak blokir respon)
+	go syncDepartureToDriverAccount(input)
+
 	c.JSON(http.StatusCreated, input)
 }
 
@@ -396,6 +508,10 @@ func UpdateDepartureSetting(c *gin.Context) {
 
 	input.ID = id
 	input.PassengerCount = strconv.Itoa(count)
+
+	// バ. Sync ke akun driver (best effort, tidak blokir respon)
+	go syncDepartureToDriverAccount(input)
+
 	c.JSON(http.StatusOK, input)
 }
 
@@ -459,4 +575,132 @@ func getTripESuratJalanDB(q queryRower, tripNo string) string {
 		tripNo,
 	).Scan(&s)
 	return strings.TrimSpace(s.String)
+}
+
+// syncDepartureToDriverAccount menyalin data pengaturan keberangkatan ke driver_accounts.
+// Best effort: tidak gagal-kan request utama jika tabel/kolom tidak ada.
+func syncDepartureToDriverAccount(dep DepartureSetting) {
+	table := "driver_accounts"
+	if !hasTable(config.DB, table) {
+		return
+	}
+
+	// gunakan default pembayaran jika tidak tersedia di payload keberangkatan
+	paymentMethod := "Cash"
+	paymentStatus := "Belum Sukses"
+	if strings.EqualFold(dep.DepartureStatus, "Berangkat") {
+		paymentStatus = "Pembayaran Sukses"
+	}
+
+	count, _ := strconv.Atoi(dep.PassengerCount)
+
+	// build payload sesuai kolom yang ada
+	buildMap := func() (cols []string, vals []any) {
+		if hasColumn(config.DB, table, "driver_name") {
+			cols = append(cols, "driver_name")
+			vals = append(vals, dep.DriverName)
+		}
+		if hasColumn(config.DB, table, "booking_name") {
+			cols = append(cols, "booking_name")
+			vals = append(vals, dep.BookingName)
+		}
+		if hasColumn(config.DB, table, "phone") {
+			cols = append(cols, "phone")
+			vals = append(vals, dep.Phone)
+		}
+		if hasColumn(config.DB, table, "pickup_address") {
+			cols = append(cols, "pickup_address")
+			vals = append(vals, dep.PickupAddress)
+		}
+		if hasColumn(config.DB, table, "departure_date") {
+			cols = append(cols, "departure_date")
+			vals = append(vals, nullIfEmpty(dep.DepartureDate))
+		}
+		if hasColumn(config.DB, table, "seat_numbers") {
+			cols = append(cols, "seat_numbers")
+			vals = append(vals, dep.SeatNumbers)
+		}
+		if hasColumn(config.DB, table, "passenger_count") {
+			cols = append(cols, "passenger_count")
+			vals = append(vals, count)
+		}
+		if hasColumn(config.DB, table, "service_type") {
+			cols = append(cols, "service_type")
+			vals = append(vals, dep.ServiceType)
+		}
+		if hasColumn(config.DB, table, "payment_method") {
+			cols = append(cols, "payment_method")
+			vals = append(vals, paymentMethod)
+		}
+		if hasColumn(config.DB, table, "payment_status") {
+			cols = append(cols, "payment_status")
+			vals = append(vals, paymentStatus)
+		}
+		if hasColumn(config.DB, table, "departure_status") {
+			cols = append(cols, "departure_status")
+			vals = append(vals, dep.DepartureStatus)
+		}
+		if hasColumn(config.DB, table, "departure_setting_id") {
+			cols = append(cols, "departure_setting_id")
+			vals = append(vals, dep.ID)
+		}
+		return
+	}
+
+	cols, vals := buildMap()
+	if len(cols) == 0 {
+		return
+	}
+
+	// coba update dulu (berdasarkan departure_setting_id jika ada, jika tidak pakai kombinasi unik sederhana)
+	where := []string{}
+	whereArgs := []any{}
+	if hasColumn(config.DB, table, "departure_setting_id") && dep.ID > 0 {
+		where = append(where, "departure_setting_id=?")
+		whereArgs = append(whereArgs, dep.ID)
+	}
+	if len(where) == 0 {
+		if strings.TrimSpace(dep.BookingName) != "" && hasColumn(config.DB, table, "booking_name") {
+			where = append(where, "booking_name=?")
+			whereArgs = append(whereArgs, dep.BookingName)
+		}
+		if strings.TrimSpace(dep.DepartureDate) != "" && hasColumn(config.DB, table, "departure_date") {
+			where = append(where, "departure_date=?")
+			whereArgs = append(whereArgs, nullIfEmpty(dep.DepartureDate))
+		}
+		if strings.TrimSpace(dep.DriverName) != "" && hasColumn(config.DB, table, "driver_name") {
+			where = append(where, "driver_name=?")
+			whereArgs = append(whereArgs, dep.DriverName)
+		}
+	}
+
+	// Jika tidak ada klausa WHERE yang aman, fallback ke insert saja
+	if len(where) > 0 {
+		setParts := make([]string, 0, len(cols))
+		for _, c := range cols {
+			setParts = append(setParts, c+"=?")
+		}
+		args := append([]any{}, vals...)
+		args = append(args, whereArgs...)
+
+		res, err := config.DB.Exec(
+			`UPDATE `+table+` SET `+strings.Join(setParts, ", ")+` WHERE `+strings.Join(where, " AND "),
+			args...,
+		)
+		if err == nil {
+			if rows, _ := res.RowsAffected(); rows > 0 {
+				return
+			}
+		}
+	}
+
+	// insert baru
+	placeholders := make([]string, len(cols))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	_, _ = config.DB.Exec(
+		`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(placeholders, ",")+`)`,
+		vals...,
+	)
 }
