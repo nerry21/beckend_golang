@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,6 +14,7 @@ import (
 type DriverAccount struct {
 	ID              int    `json:"id"`
 	DriverName      string `json:"driverName"`
+	VehicleType     string `json:"vehicleType"`
 	BookingName     string `json:"bookingName"`
 	Phone           string `json:"phone"`
 	PickupAddress   string `json:"pickupAddress"`
@@ -33,20 +35,26 @@ func GetDriverAccounts(c *gin.Context) {
 		return
 	}
 
+	vtSel := "''"
+	if hasColumn(config.DB, "driver_accounts", "vehicle_type") {
+		vtSel = "COALESCE(vehicle_type,'')"
+	}
+
 	rows, err := config.DB.Query(`
 		SELECT
 			id,
-			driver_name,
-			booking_name,
-			phone,
+			COALESCE(driver_name,''),
+			`+vtSel+`,
+			COALESCE(booking_name,''),
+			COALESCE(phone,''),
 			COALESCE(pickup_address, ''),
 			COALESCE(departure_date, ''),
 			COALESCE(seat_numbers, ''),
 			COALESCE(passenger_count, 0),
-			service_type,
-			payment_method,
-			payment_status,
-			departure_status,
+			COALESCE(service_type,''),
+			COALESCE(payment_method,''),
+			COALESCE(payment_status,''),
+			COALESCE(departure_status,''),
 			COALESCE(created_at, '')
 		FROM driver_accounts
 		ORDER BY id DESC
@@ -65,6 +73,7 @@ func GetDriverAccounts(c *gin.Context) {
 		if err := rows.Scan(
 			&d.ID,
 			&d.DriverName,
+			&d.VehicleType,
 			&d.BookingName,
 			&d.Phone,
 			&d.PickupAddress,
@@ -82,6 +91,11 @@ func GetDriverAccounts(c *gin.Context) {
 			return
 		}
 		d.PassengerCount = strconv.Itoa(countInt)
+
+		// fallback isi vehicleType dari tabel drivers jika kolom kosong
+		if strings.TrimSpace(d.VehicleType) == "" && strings.TrimSpace(d.DriverName) != "" {
+			d.VehicleType = lookupDriverVehicleType(d.DriverName)
+		}
 		list = append(list, d)
 	}
 
@@ -97,28 +111,26 @@ func CreateDriverAccount(c *gin.Context) {
 		return
 	}
 
+	// fallback isi vehicleType dari tabel drivers jika kosong
+	if strings.TrimSpace(input.VehicleType) == "" && strings.TrimSpace(input.DriverName) != "" {
+		input.VehicleType = lookupDriverVehicleType(input.DriverName)
+	}
+
 	count, _ := strconv.Atoi(input.PassengerCount)
 
-	res, err := config.DB.Exec(`
-		INSERT INTO driver_accounts
-			(driver_name, booking_name, phone, pickup_address,
-			 departure_date, seat_numbers, passenger_count,
-			 service_type, payment_method, payment_status,
-			 departure_status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`,
-		input.DriverName,
-		input.BookingName,
-		input.Phone,
-		input.PickupAddress,
-		nullIfEmpty(input.DepartureDate),
-		input.SeatNumbers,
-		count,
-		input.ServiceType,
-		input.PaymentMethod,
-		input.PaymentStatus,
-		input.DepartureStatus,
-	)
+	cols := []string{"driver_name", "booking_name", "phone", "pickup_address", "departure_date", "seat_numbers", "passenger_count", "service_type", "payment_method", "payment_status", "departure_status"}
+	vals := []any{input.DriverName, input.BookingName, input.Phone, input.PickupAddress, nullIfEmpty(input.DepartureDate), input.SeatNumbers, count, input.ServiceType, input.PaymentMethod, input.PaymentStatus, input.DepartureStatus}
+	if hasColumn(config.DB, "driver_accounts", "vehicle_type") {
+		cols = append([]string{"vehicle_type"}, cols...)
+		vals = append([]any{input.VehicleType}, vals...)
+	}
+
+	ph := make([]string, len(cols))
+	for i := range ph {
+		ph[i] = "?"
+	}
+
+	res, err := config.DB.Exec(`INSERT INTO driver_accounts (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
 	if err != nil {
 		log.Println("CreateDriverAccount insert error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membuat data: " + err.Error()})
@@ -150,24 +162,26 @@ func UpdateDriverAccount(c *gin.Context) {
 		return
 	}
 
+	if strings.TrimSpace(input.VehicleType) == "" && strings.TrimSpace(input.DriverName) != "" {
+		input.VehicleType = lookupDriverVehicleType(input.DriverName)
+	}
+
 	count, _ := strconv.Atoi(input.PassengerCount)
 
-	_, err = config.DB.Exec(`
-		UPDATE driver_accounts
-		SET
-			driver_name      = ?,
-			booking_name     = ?,
-			phone            = ?,
-			pickup_address   = ?,
-			departure_date   = ?,
-			seat_numbers     = ?,
-			passenger_count  = ?,
-			service_type     = ?,
-			payment_method   = ?,
-			payment_status   = ?,
-			departure_status = ?
-		WHERE id = ?
-	`,
+	setParts := []string{
+		"driver_name=?",
+		"booking_name=?",
+		"phone=?",
+		"pickup_address=?",
+		"departure_date=?",
+		"seat_numbers=?",
+		"passenger_count=?",
+		"service_type=?",
+		"payment_method=?",
+		"payment_status=?",
+		"departure_status=?",
+	}
+	args := []any{
 		input.DriverName,
 		input.BookingName,
 		input.Phone,
@@ -179,8 +193,16 @@ func UpdateDriverAccount(c *gin.Context) {
 		input.PaymentMethod,
 		input.PaymentStatus,
 		input.DepartureStatus,
-		id,
-	)
+	}
+
+	if hasColumn(config.DB, "driver_accounts", "vehicle_type") {
+		setParts = append([]string{"vehicle_type=?"}, setParts...)
+		args = append([]any{input.VehicleType}, args...)
+	}
+
+	args = append(args, id)
+
+	_, err = config.DB.Exec(`UPDATE driver_accounts SET `+strings.Join(setParts, ",")+` WHERE id = ?`, args...)
 	if err != nil {
 		log.Println("UpdateDriverAccount update error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal mengupdate data: " + err.Error()})

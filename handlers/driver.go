@@ -14,6 +14,10 @@ type Driver struct {
 	Name            string `json:"name"`
 	Phone           string `json:"phone"`
 	Role            string `json:"role"`
+
+	// ✅ kolom baru (DB: vehicle_type)
+	VehicleType string `json:"vehicleType"`
+
 	VehicleAssigned string `json:"vehicleAssigned"`
 	CreatedAt       string `json:"createdAt"`
 	Photo           string `json:"photo"`
@@ -24,11 +28,13 @@ func GetDrivers(c *gin.Context) {
 	rows, err := config.DB.Query(`
 		SELECT
 			id,
-			name,
-			phone,
-			role,
+			COALESCE(name, ''),
+			COALESCE(phone, ''),
+			COALESCE(role, ''),
+			COALESCE(vehicle_type, ''),
 			COALESCE(vehicle_assigned, ''),
-			COALESCE(created_at, '')
+			COALESCE(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), ''),
+			COALESCE(photo, '')
 		FROM drivers
 		ORDER BY id DESC
 	`)
@@ -47,14 +53,22 @@ func GetDrivers(c *gin.Context) {
 			&d.Name,
 			&d.Phone,
 			&d.Role,
+			&d.VehicleType,
 			&d.VehicleAssigned,
 			&d.CreatedAt,
+			&d.Photo,
 		); err != nil {
 			log.Println("GetDrivers scan error:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membaca data driver: " + err.Error()})
 			return
 		}
 		drivers = append(drivers, d)
+	}
+
+	if err := rows.Err(); err != nil {
+		log.Println("GetDrivers rows error:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membaca data driver: " + err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusOK, drivers)
@@ -70,13 +84,15 @@ func CreateDriver(c *gin.Context) {
 	}
 
 	res, err := config.DB.Exec(`
-		INSERT INTO drivers (name, phone, role, vehicle_assigned)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO drivers (name, phone, role, vehicle_type, vehicle_assigned, photo)
+		VALUES (?, ?, ?, ?, ?, ?)
 	`,
 		input.Name,
 		input.Phone,
 		input.Role,
+		input.VehicleType,
 		input.VehicleAssigned,
+		input.Photo,
 	)
 	if err != nil {
 		log.Println("CreateDriver insert error:", err)
@@ -86,7 +102,17 @@ func CreateDriver(c *gin.Context) {
 
 	id, _ := res.LastInsertId()
 	input.ID = int(id)
-	_ = config.DB.QueryRow("SELECT COALESCE(created_at, '') FROM drivers WHERE id = ?", id).Scan(&input.CreatedAt)
+
+	// Ambil created_at yang sudah terbentuk dari DB (dan pastikan field konsisten)
+	_ = config.DB.QueryRow(`
+		SELECT
+			COALESCE(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), ''),
+			COALESCE(photo, ''),
+			COALESCE(vehicle_type, ''),
+			COALESCE(vehicle_assigned, '')
+		FROM drivers
+		WHERE id = ?
+	`, id).Scan(&input.CreatedAt, &input.Photo, &input.VehicleType, &input.VehicleAssigned)
 
 	c.JSON(http.StatusCreated, input)
 }
@@ -107,19 +133,24 @@ func UpdateDriver(c *gin.Context) {
 		return
 	}
 
+	// ✅ Update vehicle_type juga
 	_, err = config.DB.Exec(`
 		UPDATE drivers
 		SET
 			name             = ?,
 			phone            = ?,
 			role             = ?,
-			vehicle_assigned = ?
+			vehicle_type      = ?,
+			vehicle_assigned = ?,
+			photo            = ?
 		WHERE id = ?
 	`,
 		input.Name,
 		input.Phone,
 		input.Role,
+		input.VehicleType,
 		input.VehicleAssigned,
+		input.Photo,
 		id,
 	)
 	if err != nil {
@@ -128,8 +159,39 @@ func UpdateDriver(c *gin.Context) {
 		return
 	}
 
-	input.ID = id
-	c.JSON(http.StatusOK, input)
+	// ✅ Balikkan response yang konsisten dari DB
+	var out Driver
+	err = config.DB.QueryRow(`
+		SELECT
+			id,
+			COALESCE(name, ''),
+			COALESCE(phone, ''),
+			COALESCE(role, ''),
+			COALESCE(vehicle_type, ''),
+			COALESCE(vehicle_assigned, ''),
+			COALESCE(DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s'), ''),
+			COALESCE(photo, '')
+		FROM drivers
+		WHERE id = ?
+	`, id).Scan(
+		&out.ID,
+		&out.Name,
+		&out.Phone,
+		&out.Role,
+		&out.VehicleType,
+		&out.VehicleAssigned,
+		&out.CreatedAt,
+		&out.Photo,
+	)
+	if err != nil {
+		log.Println("UpdateDriver readback error:", err)
+		// fallback: tetap kirim input supaya frontend tidak blank
+		input.ID = id
+		c.JSON(http.StatusOK, input)
+		return
+	}
+
+	c.JSON(http.StatusOK, out)
 }
 
 // DELETE /api/drivers/:id

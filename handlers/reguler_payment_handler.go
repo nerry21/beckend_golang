@@ -251,7 +251,7 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal commit transaksi"})
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal commit transaksi: " + err.Error()})
 		return
 	}
 
@@ -265,13 +265,18 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 
 // ===============================
 // POST /api/reguler/bookings/:id/confirm-cash
-// Cash: langsung Lunas => trigger SyncConfirmedRegulerBooking(tx, bookingID)
+	// Cash: langsung Lunas => trigger SyncConfirmedRegulerBookingTx(tx, bookingID)
 // ===============================
 
 func ConfirmRegulerCash(c *gin.Context) {
 	bookingID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || bookingID <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"message": "id tidak valid"})
+		return
+	}
+
+	if err := config.DB.Ping(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "DB ping gagal: " + err.Error()})
 		return
 	}
 
@@ -307,7 +312,7 @@ func ConfirmRegulerCash(c *gin.Context) {
 	}
 
 	// Trigger auto-sync modul-modul setelah Lunas
-	if err := SyncConfirmedRegulerBooking(tx, bookingID); err != nil {
+	if err := SyncConfirmedRegulerBookingTx(tx, bookingID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal sync data perjalanan: " + err.Error()})
 		return
 	}

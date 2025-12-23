@@ -1,14 +1,9 @@
 package handlers
 
-import (
-	"database/sql"
-	"log"
-)
+import "backend/utils"
 
 // queryRower dipakai oleh *sql.DB dan *sql.Tx (keduanya punya QueryRow)
-type queryRower interface {
-	QueryRow(query string, args ...any) *sql.Row
-}
+type queryRower = utils.QueryRower
 
 // nullIfEmpty: helper untuk insert/update nullable string
 func nullIfEmpty(s string) any {
@@ -21,57 +16,11 @@ func nullIfEmpty(s string) any {
 // hasTable: cek tabel ada di schema/database yang aktif (DATABASE()).
 // Return bool saja agar kompatibel dengan call-site lama.
 func hasTable(q queryRower, table string) bool {
-	if q == nil || table == "" {
-		return false
-	}
-
-	var name sql.NullString
-	err := q.QueryRow(
-		`SELECT table_name
-		   FROM information_schema.tables
-		  WHERE table_schema = DATABASE()
-		    AND table_name = ?
-		  LIMIT 1`,
-		table,
-	).Scan(&name)
-
-	switch {
-	case err == nil:
-		return name.Valid
-	case err == sql.ErrNoRows:
-		return false
-	default:
-		// jangan bikin build gagal hanya karena pengecekan schema
-		log.Println("hasTable error:", table, err)
-		return false
-	}
+	return utils.HasTable(q, table)
 }
 
 // hasColumn: cek kolom ada di schema/database yang aktif (DATABASE()).
 // Return bool saja agar kompatibel dengan call-site lama.
 func hasColumn(q queryRower, table, column string) bool {
-	if q == nil || table == "" || column == "" {
-		return false
-	}
-
-	var name sql.NullString
-	err := q.QueryRow(
-		`SELECT column_name
-		   FROM information_schema.columns
-		  WHERE table_schema = DATABASE()
-		    AND table_name = ?
-		    AND column_name = ?
-		  LIMIT 1`,
-		table, column,
-	).Scan(&name)
-
-	switch {
-	case err == nil:
-		return name.Valid
-	case err == sql.ErrNoRows:
-		return false
-	default:
-		log.Println("hasColumn error:", table, column, err)
-		return false
-	}
+	return utils.HasColumn(q, table, column)
 }

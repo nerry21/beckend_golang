@@ -369,6 +369,15 @@ func normalizeTripDate(date string) string {
 	if date == "" {
 		return ""
 	}
+
+	// buang komponen waktu (misal "2025-12-31T00:00:00Z" atau "2025-12-31 00:00:00")
+	for _, sep := range []string{"T", " "} {
+		if idx := strings.Index(date, sep); idx > 0 {
+			date = date[:idx]
+			break
+		}
+	}
+
 	// sudah yyyy-mm-dd
 	if len(date) == 10 && strings.Count(date, "-") == 2 {
 		return date
@@ -390,10 +399,24 @@ func normalizeTripDate(date string) string {
 	return date
 }
 
+// normalizeDateOnly memastikan format yyyy-mm-dd dan membuang waktu jika ada.
+func normalizeDateOnly(date string) string {
+	return normalizeTripDate(date)
+}
+
 func normalizeTripTime(t string) string {
 	t = strings.TrimSpace(t)
 	if t == "" {
 		return ""
+	}
+	// buang komponen tanggal jika ikut terkirim (misal "2025-12-31T08:00:00")
+	if strings.Contains(t, "T") {
+		parts := strings.SplitN(t, "T", 2)
+		t = parts[len(parts)-1]
+	}
+	if strings.Contains(t, " ") && len(strings.Fields(t)) >= 2 {
+		fs := strings.Fields(t)
+		t = fs[len(fs)-1]
 	}
 	// jika "8" -> "08:00"
 	if onlyDigits(t) {
@@ -536,8 +559,335 @@ func syncAll(tx *sql.Tx, p BookingSyncPayload) error {
 		}
 	}
 
-	log.Println("[SYNC] OK booking", p.BookingID, "=> trip_information + passengers + departure_settings")
+	// 4) LAPORAN KEUANGAN (trips) - auto isi setelah booking lunas
+	if hasTable(tx, "trips") {
+		if err := upsertTripFinance(tx, p); err != nil {
+			return err
+		}
+	}
+
+	log.Println("[SYNC] OK booking", p.BookingID, "=> trip_information + passengers + departure_settings + trips")
 	return nil
+}
+
+// Wrapper untuk dipanggil dari handler lain (nama eksplisit Tx agar tidak ambigu dengan handler HTTP).
+func SyncConfirmedRegulerBookingTx(tx *sql.Tx, bookingID int64) error {
+	return SyncConfirmedRegulerBooking(tx, bookingID)
+}
+
+// upsertTripFinance mengisi tabel trips (laporan keuangan) secara otomatis setelah booking LUNAS.
+// Data yang tersedia dari booking: rute, tanggal, jam, total, seat, status bayar.
+// CarCode dan driver belum diketahui di tahap ini (akan dilengkapi dari pengaturan keberangkatan).
+func upsertTripFinance(tx *sql.Tx, p BookingSyncPayload) error {
+	// pastikan tabel trips ada
+	if !hasTable(tx, "trips") {
+		return nil
+	}
+
+	// tripKey dipakai sebagai kunci stabil untuk upsert (tetap bisa update walaupun order_no nanti berubah ke LKT/...)
+	tripKey := strings.TrimSpace(autoTripNumber(p.Date, p.Time, p.From, p.To))
+	if tripKey == "" {
+		tripKey = fmt.Sprintf("BOOK-%d", p.BookingID)
+	}
+
+	day, month, year := parseDayMonthYear(p.Date)
+
+	paymentStatus := strings.TrimSpace(p.PaymentStatus)
+	if isPaidSuccess(p.PaymentStatus, p.PaymentMethod) || paymentStatus == "" {
+		paymentStatus = "Lunas"
+	}
+
+	// ✅ hitung total penumpang & total tarif berdasarkan seluruh booking yang LUNAS pada slot (tanggal+jam) yang sama
+	agg := aggregatePaidBookingsTx(tx, p.Date, p.Time, p.From, p.To)
+
+	deptPassengerCount := agg.DeptCount
+	deptPassengerFare := agg.DeptTotal
+	if deptPassengerCount == 0 {
+		deptPassengerCount = len(normalizeSeatsUnique(p.SelectedSeats))
+		if deptPassengerCount == 0 {
+			deptPassengerCount = 1
+		}
+		deptPassengerFare = p.TotalAmount
+	}
+
+	retPassengerCount := agg.RetCount
+	retPassengerFare := agg.RetTotal
+	retOrigin := ""
+	retDest := ""
+	retCategory := strings.TrimSpace(p.Category)
+	if retPassengerCount > 0 {
+		retOrigin = strings.TrimSpace(p.To)
+		retDest = strings.TrimSpace(p.From)
+	}
+
+	// ✅ cari existing record
+	var existingID int64
+	if hasColumn(tx, "trips", "trip_key") {
+		_ = tx.QueryRow(`SELECT id FROM trips WHERE trip_key=? LIMIT 1`, tripKey).Scan(&existingID)
+	} else if hasColumn(tx, "trips", "order_no") {
+		_ = tx.QueryRow(`SELECT id FROM trips WHERE order_no=? LIMIT 1`, tripKey).Scan(&existingID)
+	}
+
+	// UPDATE: hanya update field yang berasal dari booking (jangan timpa car_code/driver/vehicle/order_no yang diisi dari Pengaturan Keberangkatan)
+	if existingID > 0 {
+		setParts := []string{}
+		args := []any{}
+		addSet := func(col string, val any) {
+			if hasColumn(tx, "trips", col) {
+				setParts = append(setParts, col+"=?")
+				args = append(args, val)
+			}
+		}
+
+		addSet("trip_key", tripKey)
+		addSet("day", day)
+		addSet("month", month)
+		addSet("year", year)
+		addSet("dept_origin", strings.TrimSpace(p.From))
+		addSet("dept_dest", strings.TrimSpace(p.To))
+		addSet("dept_category", strings.TrimSpace(p.Category))
+		addSet("dept_passenger_count", deptPassengerCount)
+		addSet("dept_passenger_fare", deptPassengerFare)
+		addSet("ret_origin", retOrigin)
+		addSet("ret_dest", retDest)
+		addSet("ret_category", retCategory)
+		addSet("ret_passenger_count", retPassengerCount)
+		addSet("ret_passenger_fare", retPassengerFare)
+		addSet("payment_status", paymentStatus)
+
+		if len(setParts) == 0 {
+			return nil
+		}
+
+		args = append(args, existingID)
+		_, err := tx.Exec(`UPDATE trips SET `+strings.Join(setParts, ", ")+` WHERE id=?`, args...)
+		return err
+	}
+
+	// INSERT: isi minimal dari booking, sementara car_code/vehicle_name/driver_name tetap kosong (akan diisi saat status Berangkat)
+	cols := []string{}
+	vals := []any{}
+	addCol := func(col string, val any) {
+		if hasColumn(tx, "trips", col) {
+			cols = append(cols, col)
+			vals = append(vals, val)
+		}
+	}
+
+	addCol("trip_key", tripKey)
+	addCol("day", day)
+	addCol("month", month)
+	addCol("year", year)
+	addCol("car_code", "")
+	addCol("vehicle_name", "")
+	addCol("driver_name", "")
+	addCol("order_no", tripKey)
+
+	addCol("dept_origin", strings.TrimSpace(p.From))
+	addCol("dept_dest", strings.TrimSpace(p.To))
+	addCol("dept_category", strings.TrimSpace(p.Category))
+	addCol("dept_passenger_count", deptPassengerCount)
+	addCol("dept_passenger_fare", deptPassengerFare)
+	addCol("dept_package_count", 0)
+	addCol("dept_package_fare", 0)
+
+	addCol("ret_origin", retOrigin)
+	addCol("ret_dest", retDest)
+	addCol("ret_category", retCategory)
+	addCol("ret_passenger_count", retPassengerCount)
+	addCol("ret_passenger_fare", retPassengerFare)
+	addCol("ret_package_count", 0)
+	addCol("ret_package_fare", 0)
+
+	addCol("other_income", 0)
+	addCol("bbm_fee", 0)
+	addCol("meal_fee", 0)
+	addCol("courier_fee", 0)
+	addCol("tol_parkir_fee", 0)
+	addCol("payment_status", paymentStatus)
+
+	if len(cols) == 0 {
+		return nil
+	}
+
+	ph := make([]string, 0, len(cols))
+	for range cols {
+		ph = append(ph, "?")
+	}
+
+	_, err := tx.Exec(`INSERT INTO trips (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
+	return err
+}
+
+// aggregatePaidBookingsTx menjumlahkan penumpang & tarif invoice untuk slot (tanggal + jam) yang sudah tervalidasi.
+// ✅ Total tarif harus mengikuti total_amount/total (invoice) — bukan tarif per-seat.
+func aggregatePaidBookingsTx(tx *sql.Tx, date, timeStr, from, to string) bookingAggregate {
+	if tx == nil {
+		return bookingAggregate{}
+	}
+
+	table := ""
+	switch {
+	case hasTable(tx, "bookings"):
+		table = "bookings"
+	case hasTable(tx, "reguler_bookings"):
+		table = "reguler_bookings"
+	default:
+		return bookingAggregate{}
+	}
+
+	if !hasColumn(tx, table, "trip_date") || !hasColumn(tx, table, "trip_time") {
+		return bookingAggregate{}
+	}
+
+	dateOnly := normalizeDateOnly(date)
+	if dateOnly == "" {
+		return bookingAggregate{}
+	}
+	timeOnly := normalizeTripTime(timeStr)
+
+	seatCol := ""
+	for _, c := range []string{"selected_seats", "seats_json"} {
+		if hasColumn(tx, table, c) {
+			seatCol = c
+			break
+		}
+	}
+
+	fromCol := ""
+	for _, c := range []string{"from_city", "route_from"} {
+		if hasColumn(tx, table, c) {
+			fromCol = c
+			break
+		}
+	}
+
+	toCol := ""
+	for _, c := range []string{"to_city", "route_to"} {
+		if hasColumn(tx, table, c) {
+			toCol = c
+			break
+		}
+	}
+
+	totalCol := "total_amount"
+	if !hasColumn(tx, table, totalCol) && hasColumn(tx, table, "total") {
+		totalCol = "total"
+	}
+
+	seatSel := "''"
+	if seatCol != "" {
+		seatSel = "COALESCE(" + seatCol + ", '')"
+	}
+
+	fromSel := "''"
+	if fromCol != "" {
+		fromSel = "COALESCE(" + fromCol + ", '')"
+	}
+
+	toSel := "''"
+	if toCol != "" {
+		toSel = "COALESCE(" + toCol + ", '')"
+	}
+
+	payStatusSel := "''"
+	if hasColumn(tx, table, "payment_status") {
+		payStatusSel = "COALESCE(payment_status, '')"
+	}
+
+	payMethodSel := "''"
+	if hasColumn(tx, table, "payment_method") {
+		payMethodSel = "COALESCE(payment_method, '')"
+	}
+
+	q := fmt.Sprintf(`
+		SELECT
+			id,
+			%s AS seat_raw,
+			COALESCE(%s, 0) AS total_amount,
+			%s AS pay_status,
+			%s AS pay_method,
+			%s AS route_from,
+			%s AS route_to
+		FROM %s
+		WHERE %s
+	`, seatSel, totalCol, payStatusSel, payMethodSel, fromSel, toSel, table, "%s")
+
+	where := []string{`COALESCE(trip_date,'') LIKE ?`}
+	args := []any{dateOnly + "%"}
+	if timeOnly != "" {
+		where = append(where, `COALESCE(trip_time,'') LIKE ?`)
+		args = append(args, timeOnly+"%")
+	}
+
+	rows, err := tx.Query(fmt.Sprintf(q, strings.Join(where, " AND ")), args...)
+	if err != nil {
+		return bookingAggregate{}
+	}
+	defer rows.Close()
+
+	agg := bookingAggregate{}
+	hasRoute := strings.TrimSpace(from) != "" && strings.TrimSpace(to) != "" && fromCol != "" && toCol != ""
+	fromLC := strings.ToLower(strings.TrimSpace(from))
+	toLC := strings.ToLower(strings.TrimSpace(to))
+
+	for rows.Next() {
+		var (
+			id        int64
+			seatRaw   string
+			totalAmt  int64
+			payStatus string
+			payMethod string
+			rFrom     string
+			rTo       string
+		)
+		if err := rows.Scan(&id, &seatRaw, &totalAmt, &payStatus, &payMethod, &rFrom, &rTo); err != nil {
+			continue
+		}
+
+		if !isPaidSuccess(payStatus, payMethod) {
+			continue
+		}
+
+		cnt := seatCountWithFallback(tx, id, seatRaw)
+
+		classified := false
+		if hasRoute {
+			rf := strings.ToLower(strings.TrimSpace(rFrom))
+			rt := strings.ToLower(strings.TrimSpace(rTo))
+			if rf == fromLC && rt == toLC {
+				agg.DeptCount += cnt
+				agg.DeptTotal += totalAmt
+				classified = true
+			} else if rf == toLC && rt == fromLC {
+				agg.RetCount += cnt
+				agg.RetTotal += totalAmt
+				classified = true
+			}
+		}
+
+		if !classified {
+			agg.DeptCount += cnt
+			agg.DeptTotal += totalAmt
+		}
+	}
+
+	return agg
+}
+
+// parseDayMonthYear mengubah "YYYY-MM-DD" menjadi day, month(1..12), year.
+func parseDayMonthYear(dateStr string) (int, int, int) {
+	clean := normalizeDateOnly(dateStr)
+	if clean == "" {
+		now := time.Now()
+		return now.Day(), int(now.Month()), now.Year()
+	}
+	d, err := time.Parse("2006-01-02", clean)
+	if err != nil {
+		now := time.Now()
+		return now.Day(), int(now.Month()), now.Year()
+	}
+	return d.Day(), int(d.Month()), d.Year()
 }
 
 func upsertTripInformation(tx *sql.Tx, p BookingSyncPayload) error {
@@ -670,32 +1020,46 @@ func upsertPassengers(tx *sql.Tx, p BookingSyncPayload) error {
 		if hasColumn(tx, "booking_passengers", "passenger_name") {
 			rows, err := tx.Query(`SELECT seat_code, COALESCE(passenger_name,'') FROM booking_passengers WHERE booking_id=?`, p.BookingID)
 			if err == nil {
-				defer rows.Close()
 				for rows.Next() {
 					var seat, name string
-					_ = rows.Scan(&seat, &name)
+					if err := rows.Scan(&seat, &name); err != nil {
+						_ = rows.Close()
+						return err
+					}
 					seat = strings.ToUpper(strings.TrimSpace(seat))
 					name = strings.TrimSpace(name)
 					if seat != "" && name != "" {
 						seatName[seat] = name
 					}
 				}
+				if err := rows.Err(); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				_ = rows.Close()
 			}
 		}
 		// phone (kalau ada)
 		if hasColumn(tx, "booking_passengers", "passenger_phone") {
 			rows, err := tx.Query(`SELECT seat_code, COALESCE(passenger_phone,'') FROM booking_passengers WHERE booking_id=?`, p.BookingID)
 			if err == nil {
-				defer rows.Close()
 				for rows.Next() {
 					var seat, ph string
-					_ = rows.Scan(&seat, &ph)
+					if err := rows.Scan(&seat, &ph); err != nil {
+						_ = rows.Close()
+						return err
+					}
 					seat = strings.ToUpper(strings.TrimSpace(seat))
 					ph = strings.TrimSpace(ph)
 					if seat != "" && ph != "" {
 						seatPhone[seat] = ph
 					}
 				}
+				if err := rows.Err(); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				_ = rows.Close()
 			}
 		}
 	}
@@ -967,6 +1331,26 @@ func joinSeatsForDB(seats []string) string {
 		return ""
 	}
 	return strings.Join(normalizeSeatsUnique(seats), ", ")
+}
+
+// seatCountWithFallback menghitung jumlah penumpang berdasarkan seats di payload booking atau tabel booking_passengers.
+// txOrDB wajib implement QueryRow (*sql.Tx atau *sql.DB).
+func seatCountWithFallback(txOrDB queryRower, bookingID int64, seatRaw string) int {
+	seats := parseSeatsFlexible(seatRaw)
+	cnt := len(normalizeSeatsUnique(seats))
+
+	if cnt == 0 && bookingID > 0 && hasTable(txOrDB, "booking_passengers") && hasColumn(txOrDB, "booking_passengers", "booking_id") {
+		var pc int
+		_ = txOrDB.QueryRow(`SELECT COUNT(*) FROM booking_passengers WHERE booking_id=?`, bookingID).Scan(&pc)
+		if pc > 0 {
+			cnt = pc
+		}
+	}
+
+	if cnt == 0 {
+		cnt = 1
+	}
+	return cnt
 }
 
 // build string daftar penumpang dari booking_passengers (kalau ada)
