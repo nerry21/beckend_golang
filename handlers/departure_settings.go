@@ -863,7 +863,10 @@ func syncDepartureToTrips(dep DepartureSetting) {
 
 	paymentStatus := "Belum Lunas"
 	if hasBooking {
-		paymentStatus = "Lunas"
+		paymentStatus = strings.TrimSpace(booking.PaymentStatus)
+		if paymentStatus == "" {
+			paymentStatus = "Lunas"
+		}
 	}
 
 	// No Order format LKT/XX/KODE (urut per hari per kode mobil)
@@ -910,6 +913,52 @@ func syncDepartureToTrips(dep DepartureSetting) {
 	}
 
 	if existingID > 0 {
+		// Jangan menimpa nominal/jumlah yang sudah terisi jika hitungan baru nol
+		var oldDeptFare, oldRetFare int64
+		var oldDeptCount, oldRetCount int
+		oldPayStatus := ""
+		selCols := []string{}
+		destPtrs := []any{}
+		if hasColumn(config.DB, table, "dept_passenger_fare") {
+			selCols = append(selCols, "COALESCE(dept_passenger_fare,0)")
+			destPtrs = append(destPtrs, &oldDeptFare)
+		}
+		if hasColumn(config.DB, table, "ret_passenger_fare") {
+			selCols = append(selCols, "COALESCE(ret_passenger_fare,0)")
+			destPtrs = append(destPtrs, &oldRetFare)
+		}
+		if hasColumn(config.DB, table, "dept_passenger_count") {
+			selCols = append(selCols, "COALESCE(dept_passenger_count,0)")
+			destPtrs = append(destPtrs, &oldDeptCount)
+		}
+		if hasColumn(config.DB, table, "ret_passenger_count") {
+			selCols = append(selCols, "COALESCE(ret_passenger_count,0)")
+			destPtrs = append(destPtrs, &oldRetCount)
+		}
+		if hasColumn(config.DB, table, "payment_status") {
+			selCols = append(selCols, "COALESCE(payment_status,'')")
+			destPtrs = append(destPtrs, &oldPayStatus)
+		}
+		if len(selCols) > 0 {
+			_ = config.DB.QueryRow(`SELECT `+strings.Join(selCols, ",")+` FROM `+table+` WHERE id=? LIMIT 1`, existingID).Scan(destPtrs...)
+		}
+		if deptPassengerFare == 0 && oldDeptFare > 0 {
+			deptPassengerFare = oldDeptFare
+		}
+		if retPassengerFare == 0 && oldRetFare > 0 {
+			retPassengerFare = oldRetFare
+		}
+		if deptPassengerCount == 0 && oldDeptCount > 0 {
+			deptPassengerCount = oldDeptCount
+		}
+		if retPassengerCount == 0 && oldRetCount > 0 {
+			retPassengerCount = oldRetCount
+		}
+		// jangan turunkan status yang sudah Lunas
+		if strings.EqualFold(oldPayStatus, "Lunas") {
+			paymentStatus = oldPayStatus
+		}
+
 		setParts := []string{}
 		args := []any{}
 
@@ -1006,216 +1055,4 @@ func lookupDriverVehicleType(name string) string {
 		n,
 	).Scan(&vt)
 	return strings.TrimSpace(vt.String)
-}
-
-// loadBookingFinancePayload mengambil data booking untuk kebutuhan sinkronisasi laporan keuangan.
-// Dibatasi pada informasi tanggal, rute, jumlah kursi, nominal invoice, dan status pembayaran.
-func loadBookingFinancePayload(bookingID int64) (BookingSyncPayload, bool) {
-	if bookingID <= 0 {
-		return BookingSyncPayload{}, false
-	}
-
-	tx, err := config.DB.Begin()
-	if err != nil {
-		log.Println("loadBookingFinancePayload begin tx error:", err)
-		return BookingSyncPayload{}, false
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	p, err := readBookingPayload(tx, bookingID)
-	if err != nil {
-		log.Println("loadBookingFinancePayload read error:", err)
-		return BookingSyncPayload{}, false
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Println("loadBookingFinancePayload commit error:", err)
-		return BookingSyncPayload{}, false
-	}
-
-	return p, true
-}
-
-type bookingAggregate struct {
-	DeptCount int
-	DeptTotal int64
-	RetCount  int
-	RetTotal  int64
-}
-
-// aggregatePaidBookings menjumlahkan penumpang & tarif invoice untuk slot (tanggal + jam) yang sudah tervalidasi.
-func aggregatePaidBookings(date, timeStr, from, to string) bookingAggregate {
-	table := ""
-	switch {
-	case hasTable(config.DB, "bookings"):
-		table = "bookings"
-	case hasTable(config.DB, "reguler_bookings"):
-		table = "reguler_bookings"
-	default:
-		return bookingAggregate{}
-	}
-
-	if !hasColumn(config.DB, table, "trip_date") || !hasColumn(config.DB, table, "trip_time") {
-		return bookingAggregate{}
-	}
-
-	dateOnly := normalizeDateOnly(date)
-	if dateOnly == "" {
-		return bookingAggregate{}
-	}
-	timeOnly := normalizeTripTime(timeStr)
-
-	seatCol := ""
-	for _, c := range []string{"selected_seats", "seats_json"} {
-		if hasColumn(config.DB, table, c) {
-			seatCol = c
-			break
-		}
-	}
-
-	fromCol := ""
-	for _, c := range []string{"from_city", "route_from"} {
-		if hasColumn(config.DB, table, c) {
-			fromCol = c
-			break
-		}
-	}
-
-	toCol := ""
-	for _, c := range []string{"to_city", "route_to"} {
-		if hasColumn(config.DB, table, c) {
-			toCol = c
-			break
-		}
-	}
-
-	totalCol := "total_amount"
-	if !hasColumn(config.DB, table, totalCol) && hasColumn(config.DB, table, "total") {
-		totalCol = "total"
-	}
-
-	seatSel := "''"
-	if seatCol != "" {
-		seatSel = "COALESCE(" + seatCol + ", '')"
-	}
-
-	fromSel := "''"
-	if fromCol != "" {
-		fromSel = "COALESCE(" + fromCol + ", '')"
-	}
-
-	toSel := "''"
-	if toCol != "" {
-		toSel = "COALESCE(" + toCol + ", '')"
-	}
-
-	payStatusSel := "''"
-	if hasColumn(config.DB, table, "payment_status") {
-		payStatusSel = "COALESCE(payment_status, '')"
-	}
-
-	payMethodSel := "''"
-	if hasColumn(config.DB, table, "payment_method") {
-		payMethodSel = "COALESCE(payment_method, '')"
-	}
-
-	q := fmt.Sprintf(`
-		SELECT
-			id,
-			%s AS seat_raw,
-			COALESCE(%s, 0) AS total_amount,
-			%s AS pay_status,
-			%s AS pay_method,
-			%s AS route_from,
-			%s AS route_to
-		FROM %s
-		WHERE %s
-	`, seatSel, totalCol, payStatusSel, payMethodSel, fromSel, toSel, table, "%s")
-
-	where := []string{`COALESCE(trip_date,'') LIKE ?`}
-	args := []any{dateOnly + "%"}
-	if timeOnly != "" {
-		where = append(where, `COALESCE(trip_time,'') LIKE ?`)
-		args = append(args, timeOnly+"%")
-	}
-
-	rows, err := config.DB.Query(fmt.Sprintf(q, strings.Join(where, " AND ")), args...)
-	if err != nil {
-		return bookingAggregate{}
-	}
-	defer rows.Close()
-
-	agg := bookingAggregate{}
-	hasRoute := strings.TrimSpace(from) != "" && strings.TrimSpace(to) != "" && fromCol != "" && toCol != ""
-	fromLC := strings.ToLower(strings.TrimSpace(from))
-	toLC := strings.ToLower(strings.TrimSpace(to))
-
-	for rows.Next() {
-		var (
-			id        int64
-			seatRaw   string
-			totalAmt  int64
-			payStatus string
-			payMethod string
-			rFrom     string
-			rTo       string
-		)
-		if err := rows.Scan(&id, &seatRaw, &totalAmt, &payStatus, &payMethod, &rFrom, &rTo); err != nil {
-			continue
-		}
-
-		if !isPaidSuccess(payStatus, payMethod) {
-			continue
-		}
-
-		cnt := seatCountWithFallback(config.DB, id, seatRaw)
-
-		classified := false
-		if hasRoute {
-			rf := strings.ToLower(strings.TrimSpace(rFrom))
-			rt := strings.ToLower(strings.TrimSpace(rTo))
-			if rf == fromLC && rt == toLC {
-				agg.DeptCount += cnt
-				agg.DeptTotal += totalAmt
-				classified = true
-			} else if rf == toLC && rt == fromLC {
-				agg.RetCount += cnt
-				agg.RetTotal += totalAmt
-				classified = true
-			}
-		}
-
-		if !classified {
-			agg.DeptCount += cnt
-			agg.DeptTotal += totalAmt
-		}
-	}
-
-	return agg
-}
-
-// buildOrderNumberForTrip membuat nomor order berbasis kode mobil dengan format LKT/NN/KODE.
-func buildOrderNumberForTrip(carCode string, day, month, year int) string {
-	cc := strings.ToUpper(strings.TrimSpace(carCode))
-	if cc == "" {
-		return ""
-	}
-
-	seq := 1
-	if hasTable(config.DB, "trips") && hasColumn(config.DB, "trips", "car_code") {
-		if hasColumn(config.DB, "trips", "day") && hasColumn(config.DB, "trips", "month") && hasColumn(config.DB, "trips", "year") {
-			_ = config.DB.QueryRow(
-				`SELECT COUNT(*) + 1 FROM trips WHERE car_code=? AND day=? AND month=? AND year=?`,
-				cc, day, month, year,
-			).Scan(&seq)
-		} else {
-			_ = config.DB.QueryRow(`SELECT COUNT(*) + 1 FROM trips WHERE car_code=?`, cc).Scan(&seq)
-		}
-	}
-
-	if seq < 1 {
-		seq = 1
-	}
-
-	return fmt.Sprintf("LKT/%02d/%s", seq, cc)
 }

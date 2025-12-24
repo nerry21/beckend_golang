@@ -4,6 +4,7 @@ import (
 	"backend/config"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -58,12 +59,13 @@ type Passenger struct {
 	DepartureTime  string      `json:"departureTime"` // "13:30"
 	PickupAddress  string      `json:"pickupAddress"`
 	DropoffAddress string      `json:"dropoffAddress"`
-	TotalAmount    int64       `json:"totalAmount"`    // ✅ int64 (uang)
-	SelectedSeats  SeatsString `json:"selectedSeats"`  // disimpan di DB sebagai string "1A, 2B"
-	ServiceType    string      `json:"serviceType"`    // Reguler, Dropping, Rental, Paket Barang
-	ETicketPhoto   string      `json:"eTicketPhoto"`   // base64 image / URL / marker booking
+	TotalAmount    int64       `json:"totalAmount"`   // ✅ int64 (uang)
+	SelectedSeats  SeatsString `json:"selectedSeats"` // disimpan di DB sebagai string "1A, 2B"
+	ServiceType    string      `json:"serviceType"`   // Reguler, Dropping, Rental, Paket Barang
+	ETicketPhoto   string      `json:"eTicketPhoto"`  // base64 image / URL / marker booking
 	DriverName     string      `json:"driverName"`
 	VehicleCode    string      `json:"vehicleCode"`
+	VehicleType    string      `json:"vehicleType,omitempty"`
 	Notes          string      `json:"notes"`
 	CreatedAt      string      `json:"createdAt"`
 }
@@ -80,7 +82,26 @@ func nullStringIfEmpty(s string) sql.NullString {
 
 // GET /api/passengers
 func GetPassengers(c *gin.Context) {
-	rows, err := config.DB.Query(`
+	// optional selects
+	vehicleTypeSel := "''"
+	if hasColumn(config.DB, "passengers", "vehicle_type") {
+		vehicleTypeSel = "COALESCE(vehicle_type,'')"
+	}
+	routeFromSel := "''"
+	if hasColumn(config.DB, "passengers", "route_from") {
+		routeFromSel = "COALESCE(route_from,'')"
+	}
+	routeToSel := "''"
+	if hasColumn(config.DB, "passengers", "route_to") {
+		routeToSel = "COALESCE(route_to,'')"
+	}
+
+	bookingIDSel := ""
+	if hasColumn(config.DB, "passengers", "booking_id") {
+		bookingIDSel = ", COALESCE(booking_id,0)"
+	}
+
+	query := fmt.Sprintf(`
 		SELECT
 			id,
 			COALESCE(passenger_name, ''),
@@ -95,11 +116,16 @@ func GetPassengers(c *gin.Context) {
 			COALESCE(eticket_photo, ''),
 			COALESCE(driver_name, ''),
 			COALESCE(vehicle_code, ''),
+			%s,
+			%s,
+			%s,
 			COALESCE(notes, ''),
-			COALESCE(created_at, '')
+			COALESCE(created_at, '')%s
 		FROM passengers
 		ORDER BY id DESC
-	`)
+	`, routeFromSel, routeToSel, vehicleTypeSel, bookingIDSel)
+
+	rows, err := config.DB.Query(query)
 	if err != nil {
 		log.Println("GetPassengers query error:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal mengambil data penumpang: " + err.Error()})
@@ -111,8 +137,11 @@ func GetPassengers(c *gin.Context) {
 	for rows.Next() {
 		var p Passenger
 		var seatsStr string
+		var bookingID sql.NullInt64
+		var routeFrom string
+		var routeTo string
 
-		if err := rows.Scan(
+		dests := []any{
 			&p.ID,
 			&p.PassengerName,
 			&p.PassengerPhone,
@@ -126,15 +155,55 @@ func GetPassengers(c *gin.Context) {
 			&p.ETicketPhoto,
 			&p.DriverName,
 			&p.VehicleCode,
+			&routeFrom,
+			&routeTo,
+			&p.VehicleType,
 			&p.Notes,
 			&p.CreatedAt,
-		); err != nil {
+		}
+		if bookingIDSel != "" {
+			dests = append(dests, &bookingID)
+		}
+
+		if err := rows.Scan(dests...); err != nil {
 			log.Println("GetPassengers scan error:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membaca data penumpang: " + err.Error()})
 			return
 		}
 
 		p.SelectedSeats = SeatsString(seatsStr)
+		if strings.TrimSpace(p.VehicleCode) == "" && strings.TrimSpace(p.VehicleType) != "" {
+			p.VehicleCode = p.VehicleType
+		}
+		// fallback driver/kendaraan dari departure_settings jika masih kosong
+		if bookingID.Valid && strings.TrimSpace(p.DriverName) == "" && strings.TrimSpace(p.VehicleCode) == "" && strings.TrimSpace(p.VehicleType) == "" {
+			d, v := findDriverVehicleForBooking(bookingID.Int64)
+			if strings.TrimSpace(p.DriverName) == "" {
+				p.DriverName = d
+			}
+			if strings.TrimSpace(p.VehicleCode) == "" {
+				p.VehicleCode = v
+			}
+		}
+		// fallback driver/kendaraan berbasis tanggal + rute jika masih kosong
+		if strings.TrimSpace(p.DriverName) == "" && strings.TrimSpace(p.VehicleCode) == "" {
+			from := strings.TrimSpace(routeFrom)
+			to := strings.TrimSpace(routeTo)
+			if from == "" {
+				from = p.PickupAddress
+			}
+			if to == "" {
+				to = p.DropoffAddress
+			}
+			d, v := findDriverVehicleByTrip(p.Date, p.DepartureTime, from, to)
+			if strings.TrimSpace(p.DriverName) == "" {
+				p.DriverName = d
+			}
+			if strings.TrimSpace(p.VehicleCode) == "" {
+				p.VehicleCode = v
+			}
+		}
+
 		passengers = append(passengers, p)
 	}
 
@@ -146,6 +215,122 @@ func GetPassengers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, passengers)
 }
+
+// findDriverVehicleForBooking mencoba mengambil driver dan jenis kendaraan dari departure_settings berdasar booking_id.
+func findDriverVehicleForBooking(bookingID int64) (string, string) {
+	if bookingID <= 0 || !hasTable(config.DB, "departure_settings") {
+		return "", ""
+	}
+
+	var dsID int64
+	if hasColumn(config.DB, "departure_settings", "booking_id") {
+		_ = config.DB.QueryRow(`SELECT id FROM departure_settings WHERE booking_id=? LIMIT 1`, bookingID).Scan(&dsID)
+	} else if hasColumn(config.DB, "departure_settings", "reguler_booking_id") {
+		_ = config.DB.QueryRow(`SELECT id FROM departure_settings WHERE reguler_booking_id=? LIMIT 1`, bookingID).Scan(&dsID)
+	}
+	if dsID == 0 {
+		return "", ""
+	}
+
+	var driver sql.NullString
+	if hasColumn(config.DB, "departure_settings", "driver_name") {
+		_ = config.DB.QueryRow(`SELECT COALESCE(driver_name,'') FROM departure_settings WHERE id=?`, dsID).Scan(&driver)
+	} else if hasColumn(config.DB, "departure_settings", "driver") {
+		_ = config.DB.QueryRow(`SELECT COALESCE(driver,'') FROM departure_settings WHERE id=?`, dsID).Scan(&driver)
+	}
+
+	var vehicle sql.NullString
+	switch {
+	case hasColumn(config.DB, "departure_settings", "vehicle_type"):
+		_ = config.DB.QueryRow(`SELECT COALESCE(vehicle_type,'') FROM departure_settings WHERE id=?`, dsID).Scan(&vehicle)
+	case hasColumn(config.DB, "departure_settings", "vehicle_name"):
+		_ = config.DB.QueryRow(`SELECT COALESCE(vehicle_name,'') FROM departure_settings WHERE id=?`, dsID).Scan(&vehicle)
+	case hasColumn(config.DB, "departure_settings", "vehicle"):
+		_ = config.DB.QueryRow(`SELECT COALESCE(vehicle,'') FROM departure_settings WHERE id=?`, dsID).Scan(&vehicle)
+	case hasColumn(config.DB, "departure_settings", "vehicle_code"):
+		_ = config.DB.QueryRow(`SELECT COALESCE(vehicle_code,'') FROM departure_settings WHERE id=?`, dsID).Scan(&vehicle)
+	case hasColumn(config.DB, "departure_settings", "car_code"):
+		_ = config.DB.QueryRow(`SELECT COALESCE(car_code,'') FROM departure_settings WHERE id=?`, dsID).Scan(&vehicle)
+	}
+
+	d := strings.TrimSpace(driver.String)
+	v := strings.TrimSpace(vehicle.String)
+	if v == "" && d != "" {
+		v = loadDriverVehicleTypeByDriverName(d)
+	}
+
+	return d, v
+}
+
+// findDriverVehicleByTrip mencoba cari driver/kendaraan di departure_settings berdasarkan tanggal + rute.
+func findDriverVehicleByTrip(dateStr, timeStr, from, to string) (string, string) {
+	if !hasTable(config.DB, "departure_settings") {
+		return "", ""
+	}
+
+	dateOnly := normalizeDateOnly(dateStr)
+	timeOnly := normalizeTripTime(timeStr)
+
+	cond := []string{}
+	args := []any{}
+	if hasColumn(config.DB, "departure_settings", "departure_date") && dateOnly != "" {
+		cond = append(cond, "DATE(COALESCE(departure_date,''))=?")
+		args = append(args, dateOnly)
+	}
+	if hasColumn(config.DB, "departure_settings", "departure_time") && timeOnly != "" {
+		cond = append(cond, "LEFT(COALESCE(departure_time,''),5)=?")
+		args = append(args, timeOnly)
+	}
+	if hasColumn(config.DB, "departure_settings", "route_from") && strings.TrimSpace(from) != "" {
+		cond = append(cond, "LOWER(TRIM(route_from))=?")
+		args = append(args, strings.ToLower(strings.TrimSpace(from)))
+	}
+	if hasColumn(config.DB, "departure_settings", "route_to") && strings.TrimSpace(to) != "" {
+		cond = append(cond, "LOWER(TRIM(route_to))=?")
+		args = append(args, strings.ToLower(strings.TrimSpace(to)))
+	}
+
+	if len(cond) == 0 {
+		return "", ""
+	}
+
+	driverSel := "''"
+	if hasColumn(config.DB, "departure_settings", "driver_name") {
+		driverSel = "COALESCE(driver_name,'')"
+	} else if hasColumn(config.DB, "departure_settings", "driver") {
+		driverSel = "COALESCE(driver,'')"
+	}
+
+	vehicleSel := "''"
+	switch {
+	case hasColumn(config.DB, "departure_settings", "vehicle_type"):
+		vehicleSel = "COALESCE(vehicle_type,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle_name"):
+		vehicleSel = "COALESCE(vehicle_name,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle"):
+		vehicleSel = "COALESCE(vehicle,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle_code"):
+		vehicleSel = "COALESCE(vehicle_code,'')"
+	case hasColumn(config.DB, "departure_settings", "car_code"):
+		vehicleSel = "COALESCE(car_code,'')"
+	}
+
+	q := fmt.Sprintf(`SELECT %s, %s FROM departure_settings WHERE %s ORDER BY id DESC LIMIT 1`, driverSel, vehicleSel, strings.Join(cond, " AND "))
+
+	var d sql.NullString
+	var v sql.NullString
+	if err := config.DB.QueryRow(q, args...).Scan(&d, &v); err != nil {
+		return "", ""
+	}
+
+	driver := strings.TrimSpace(d.String)
+	vehicle := strings.TrimSpace(v.String)
+	if vehicle == "" && driver != "" {
+		vehicle = loadDriverVehicleTypeByDriverName(driver)
+	}
+	return driver, vehicle
+}
+
 
 // POST /api/passengers
 func CreatePassenger(c *gin.Context) {

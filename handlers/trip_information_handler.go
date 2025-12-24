@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -62,6 +63,14 @@ func GetTripInformation(c *gin.Context) {
 	if hasColumn(config.DB, "trip_information", "departure_time") {
 		depTimeSel = `ti.departure_time`
 	}
+	routeFromSel := "''"
+	routeToSel := "''"
+	if hasColumn(config.DB, "trip_information", "route_from") {
+		routeFromSel = "COALESCE(ti.route_from,'')"
+	}
+	if hasColumn(config.DB, "trip_information", "route_to") {
+		routeToSel = "COALESCE(ti.route_to,'')"
+	}
 
 	query := `
 		SELECT
@@ -69,6 +78,8 @@ func GetTripInformation(c *gin.Context) {
 			ti.trip_number,
 			ti.departure_date,
 			` + depTimeSel + `,
+			` + routeFromSel + `,
+			` + routeToSel + `,
 			COALESCE(ti.driver_name,''),
 			COALESCE(ti.vehicle_code,''),
 			COALESCE(ti.license_plate,''),
@@ -98,6 +109,8 @@ func GetTripInformation(c *gin.Context) {
 		var t TripInformation
 		var depDate sql.NullString
 		var depTime sql.NullString
+		var routeFrom sql.NullString
+		var routeTo sql.NullString
 		var driver sql.NullString
 		var vehicle sql.NullString
 		var plate sql.NullString
@@ -108,6 +121,8 @@ func GetTripInformation(c *gin.Context) {
 			&t.TripNumber,
 			&depDate,
 			&depTime,
+			&routeFrom,
+			&routeTo,
 			&driver,
 			&vehicle,
 			&plate,
@@ -139,6 +154,22 @@ func GetTripInformation(c *gin.Context) {
 			t.ESuratJalan = eSurat.String
 		}
 
+		// fallback driver/vehicle dari pengaturan keberangkatan jika masih kosong
+		if strings.TrimSpace(t.DriverName) == "" || strings.TrimSpace(t.VehicleCode) == "" {
+			rFrom := strings.TrimSpace(routeFrom.String)
+			rTo := strings.TrimSpace(routeTo.String)
+			driverName, vehicleCode, license := findDepartureDriverVehicleBySchedule(t.DepartureDate, t.DepartureTime, rFrom, rTo)
+			if strings.TrimSpace(t.DriverName) == "" && driverName != "" {
+				t.DriverName = driverName
+			}
+			if strings.TrimSpace(t.VehicleCode) == "" && vehicleCode != "" {
+				t.VehicleCode = vehicleCode
+			}
+			if strings.TrimSpace(t.LicensePlate) == "" && license != "" {
+				t.LicensePlate = license
+			}
+		}
+
 		trips = append(trips, t)
 	}
 
@@ -153,10 +184,86 @@ func GetTripInformation(c *gin.Context) {
 	c.JSON(http.StatusOK, trips)
 }
 
+// findDepartureDriverVehicleBySchedule mencoba mengambil driver/vehicle dari departure_settings berdasar tanggal, jam, dan rute.
+func findDepartureDriverVehicleBySchedule(dateStr, timeStr, from, to string) (string, string, string) {
+	if !hasTable(config.DB, "departure_settings") {
+		return "", "", ""
+	}
+
+	dateOnly := normalizeTripDate(dateStr)
+	timeOnly := normalizeTripTime(timeStr)
+
+	conds := []string{}
+	args := []any{}
+
+	if hasColumn(config.DB, "departure_settings", "departure_date") && strings.TrimSpace(dateOnly) != "" {
+		conds = append(conds, "DATE(COALESCE(departure_date,''))=?")
+		args = append(args, dateOnly)
+	}
+	if hasColumn(config.DB, "departure_settings", "departure_time") && strings.TrimSpace(timeOnly) != "" {
+		conds = append(conds, "LEFT(COALESCE(departure_time,''),5)=?")
+		args = append(args, timeOnly)
+	}
+	if hasColumn(config.DB, "departure_settings", "route_from") && strings.TrimSpace(from) != "" {
+		conds = append(conds, "LOWER(TRIM(route_from))=?")
+		args = append(args, strings.ToLower(strings.TrimSpace(from)))
+	}
+	if hasColumn(config.DB, "departure_settings", "route_to") && strings.TrimSpace(to) != "" {
+		conds = append(conds, "LOWER(TRIM(route_to))=?")
+		args = append(args, strings.ToLower(strings.TrimSpace(to)))
+	}
+
+	if len(conds) == 0 {
+		return "", "", ""
+	}
+
+	driverSel := "''"
+	if hasColumn(config.DB, "departure_settings", "driver_name") {
+		driverSel = "COALESCE(driver_name,'')"
+	} else if hasColumn(config.DB, "departure_settings", "driver") {
+		driverSel = "COALESCE(driver,'')"
+	}
+
+	vehicleSel := "''"
+	switch {
+	case hasColumn(config.DB, "departure_settings", "vehicle_code"):
+		vehicleSel = "COALESCE(vehicle_code,'')"
+	case hasColumn(config.DB, "departure_settings", "car_code"):
+		vehicleSel = "COALESCE(car_code,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle_type"):
+		vehicleSel = "COALESCE(vehicle_type,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle_name"):
+		vehicleSel = "COALESCE(vehicle_name,'')"
+	case hasColumn(config.DB, "departure_settings", "vehicle"):
+		vehicleSel = "COALESCE(vehicle,'')"
+	}
+
+	plateSel := "''"
+	if hasColumn(config.DB, "departure_settings", "license_plate") {
+		plateSel = "COALESCE(license_plate,'')"
+	}
+
+	q := `SELECT ` + driverSel + `, ` + vehicleSel + `, ` + plateSel + ` FROM departure_settings WHERE ` + strings.Join(conds, " AND ") + ` ORDER BY id DESC LIMIT 1`
+
+	var d, v, p sql.NullString
+	if err := config.DB.QueryRow(q, args...).Scan(&d, &v, &p); err != nil {
+		return "", "", ""
+	}
+
+	driver := strings.TrimSpace(d.String)
+	vehicle := strings.TrimSpace(v.String)
+	plate := strings.TrimSpace(p.String)
+
+	if vehicle == "" && driver != "" {
+		vehicle = loadDriverVehicleTypeByDriverName(driver)
+	}
+	return driver, vehicle, plate
+}
+
 // POST /api/trip-information
 // ✅ Perubahan utama:
-// - Jika trip_number sudah ada, maka UPDATE record existing (bukan INSERT baru)
-//   supaya tidak dobel.
+//   - Jika trip_number sudah ada, maka UPDATE record existing (bukan INSERT baru)
+//     supaya tidak dobel.
 func CreateTripInformation(c *gin.Context) {
 	var input TripInformation
 	if err := c.ShouldBindJSON(&input); err != nil {

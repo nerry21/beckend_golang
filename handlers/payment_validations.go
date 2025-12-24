@@ -271,6 +271,7 @@ func updatePaymentValidationStatus(c *gin.Context, approved bool) {
 		return
 	}
 
+	// pastikan koneksi DB masih sehat (biar error-nya jelas kalau DB putus)
 	if err := config.DB.Ping(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "DB ping gagal: " + err.Error()})
 		return
@@ -278,7 +279,7 @@ func updatePaymentValidationStatus(c *gin.Context, approved bool) {
 
 	tx, err := config.DB.Begin()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal mulai transaksi"})
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal mulai transaksi: " + err.Error()})
 		return
 	}
 	committed := false
@@ -375,7 +376,7 @@ func updatePaymentValidationStatus(c *gin.Context, approved bool) {
 
 	// approve => sync data perjalanan + penumpang + dokumen (kalau implementasinya ada)
 	if approved {
-		if err := SyncConfirmedRegulerBookingTx(tx, bookingID); err != nil {
+		if err := SyncConfirmedRegulerBooking(tx, bookingID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"message": "approve sukses, tapi gagal sync: " + err.Error()})
 			return
 		}

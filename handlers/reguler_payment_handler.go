@@ -250,6 +250,12 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 		}
 	}
 
+	// Sinkronkan data perjalanan (tarif/penumpang) segera setelah masuk tahap validasi
+	if err := SyncConfirmedRegulerBooking(tx, bookingID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "bukti tersimpan, tapi gagal sync data perjalanan: " + err.Error()})
+		return
+	}
+
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal commit transaksi: " + err.Error()})
 		return
