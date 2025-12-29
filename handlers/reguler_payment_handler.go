@@ -4,6 +4,7 @@ package handlers
 import (
 	"backend/config"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +24,38 @@ type SubmitPaymentRequest struct {
 }
 
 // ===============================
+// Helpers: ambil kolom yang EXIST di DB
+// ===============================
+
+func firstExistingCol(table string, candidates ...string) string {
+	for _, c := range candidates {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		if hasColumn(config.DB, table, c) {
+			return c
+		}
+	}
+	return ""
+}
+
+func strExpr(col string) string {
+	if strings.TrimSpace(col) == "" {
+		return "''"
+	}
+	// CAST supaya aman untuk DATE/DATETIME/INT juga
+	return "COALESCE(CAST(" + col + " AS CHAR),'')"
+}
+
+func intExpr(col string) string {
+	if strings.TrimSpace(col) == "" {
+		return "0"
+	}
+	return "COALESCE(" + col + ",0)"
+}
+
+// ===============================
 // GET /api/reguler/bookings/:id
 // => dipakai FE untuk cek payment status/method + info ringkas booking
 // ===============================
@@ -34,18 +67,30 @@ func GetRegulerBookingDetail(c *gin.Context) {
 		return
 	}
 
+	// Booking columns (dinamis, karena nama kolom tiap project beda)
+	colCategory := firstExistingCol("bookings", "category", "service_type", "serviceType", "layanan")
+	colFrom := firstExistingCol("bookings", "route_from", "origin", "from_city", "from", "routeFrom")
+	colTo := firstExistingCol("bookings", "route_to", "destination", "to_city", "to", "routeTo")
+	colTripDate := firstExistingCol("bookings", "trip_date", "departure_date", "departureDate", "booking_date", "tanggal_pemesanan", "created_at")
+	colTripTime := firstExistingCol("bookings", "trip_time", "departure_time", "departureTime")
+	colPassengerName := firstExistingCol("bookings", "passenger_name", "booking_name", "bookingName", "customer_name", "nama_pemesan")
+	colPassengerCount := firstExistingCol("bookings", "passenger_count", "passengerCount", "jumlah_penumpang")
+	colPickup := firstExistingCol("bookings", "pickup_location", "pickup_address", "pickupAddress", "alamat_jemput")
+	colDropoff := firstExistingCol("bookings", "dropoff_location", "dropoff_address", "dropoffAddress", "alamat_turun")
+	colTotal := firstExistingCol("bookings", "total", "total_amount", "grand_total", "totalHarga", "total_harga")
+
 	cols := []string{
 		"id",
-		"COALESCE(category,'')",
-		"COALESCE(route_from,'')",
-		"COALESCE(route_to,'')",
-		"COALESCE(trip_date,'')",
-		"COALESCE(trip_time,'')",
-		"COALESCE(passenger_name,'')",
-		"COALESCE(passenger_count,0)",
-		"COALESCE(pickup_location,'')",
-		"COALESCE(dropoff_location,'')",
-		"COALESCE(total,0)",
+		strExpr(colCategory),
+		strExpr(colFrom),
+		strExpr(colTo),
+		strExpr(colTripDate),
+		strExpr(colTripTime),
+		strExpr(colPassengerName),
+		intExpr(colPassengerCount),
+		strExpr(colPickup),
+		strExpr(colDropoff),
+		intExpr(colTotal),
 	}
 
 	hasPayMethod := hasColumn(config.DB, "bookings", "payment_method")
@@ -101,19 +146,19 @@ func GetRegulerBookingDetail(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":             id,
-		"category":       category,
-		"routeFrom":      routeFrom,
-		"routeTo":        routeTo,
-		"tripDate":       tripDate,
-		"tripTime":       tripTime,
-		"passengerName":  passengerName,
-		"passengerCount": passengerCount,
-		"pickupLocation": pickup,
+		"id":              id,
+		"category":        category,
+		"routeFrom":       routeFrom,
+		"routeTo":         routeTo,
+		"tripDate":        tripDate,
+		"tripTime":        tripTime,
+		"passengerName":   passengerName,
+		"passengerCount":  passengerCount,
+		"pickupLocation":  pickup,
 		"dropoffLocation": dropoff,
-		"total":          total,
-		"paymentMethod":  paymentMethod,
-		"paymentStatus":  paymentStatus,
+		"total":           total,
+		"paymentMethod":   paymentMethod,
+		"paymentStatus":   paymentStatus,
 	})
 }
 
@@ -151,24 +196,49 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 		req.ProofFileName = "bukti-pembayaran"
 	}
 
-	// Ambil info booking ringkas untuk di-copy ke payment_validations
+	// ✅ Ambil info booking ringkas untuk di-copy ke payment_validations (DINAMIS & error tidak dibuang)
 	var (
 		customerName  string
 		customerPhone string
 		pickup        string
 		bookingDate   string
+		routeFrom     string
+		routeTo       string
+		tripRole      string
 	)
 
-	_ = config.DB.QueryRow(`
-		SELECT
-			COALESCE(passenger_name,''),
-			COALESCE(passenger_phone,''),
-			COALESCE(pickup_location,''),
-			COALESCE(trip_date,'')
-		FROM bookings
-		WHERE id = ?
-		LIMIT 1
-	`, bookingID).Scan(&customerName, &customerPhone, &pickup, &bookingDate)
+	colCustomerName := firstExistingCol("bookings", "passenger_name", "booking_name", "bookingName", "customer_name", "nama_pemesan")
+	colCustomerPhone := firstExistingCol("bookings", "passenger_phone", "phone", "customer_phone", "no_hp", "hp")
+	colPickup := firstExistingCol("bookings", "pickup_location", "pickup_address", "pickupAddress", "alamat_jemput")
+	colBookingDate := firstExistingCol("bookings", "trip_date", "departure_date", "departureDate", "booking_date", "tanggal_pemesanan", "created_at")
+	colFrom := firstExistingCol("bookings", "route_from", "origin", "from", "routeFrom")
+	colTo := firstExistingCol("bookings", "route_to", "destination", "to", "routeTo")
+	colTripRole := firstExistingCol("bookings", "trip_role", "role_trip", "tripRole")
+
+	readSQL := fmt.Sprintf(
+		`SELECT %s,%s,%s,%s,%s,%s,%s FROM bookings WHERE id=? LIMIT 1`,
+		strExpr(colCustomerName),
+		strExpr(colCustomerPhone),
+		strExpr(colPickup),
+		strExpr(colBookingDate),
+		strExpr(colFrom),
+		strExpr(colTo),
+		strExpr(colTripRole),
+	)
+
+	if err := config.DB.QueryRow(readSQL, bookingID).Scan(
+		&customerName, &customerPhone, &pickup, &bookingDate, &routeFrom, &routeTo, &tripRole,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"message": "booking tidak ditemukan untuk submit pembayaran"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal baca data booking: " + err.Error()})
+		return
+	}
+
+	// ✅ trip_role harus kosong saat Menunggu Validasi (nunggu admin edit manual)
+	tripRole = ""
 
 	tx, err := config.DB.Begin()
 	if err != nil {
@@ -200,7 +270,25 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 		req.ProofFileName,
 	}
 
-	// kalau table punya booking_id, isi biar relasi kuat
+	// ✅ origin/destination ikut dikirim jika kolom ada di payment_validations
+	if hasColumn(tx, "payment_validations", "origin") {
+		cols = append(cols, "origin")
+		vals = append(vals, "?")
+		args = append(args, routeFrom)
+	}
+	if hasColumn(tx, "payment_validations", "destination") {
+		cols = append(cols, "destination")
+		vals = append(vals, "?")
+		args = append(args, routeTo)
+	}
+
+	if hasColumn(tx, "payment_validations", "trip_role") {
+		cols = append(cols, "trip_role")
+		vals = append(vals, "?")
+		args = append(args, "")
+	}
+
+	// relasi kuat ke booking
 	if hasColumn(tx, "payment_validations", "booking_id") {
 		cols = append(cols, "booking_id")
 		vals = append(vals, "?")
@@ -237,6 +325,11 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 		updates = append(updates, "payment_validation_id = ?")
 		uargs = append(uargs, validationID)
 	}
+	// trip_role dikosongkan sampai user set manual di validasi
+	if hasColumn(tx, "bookings", "trip_role") {
+		updates = append(updates, "trip_role = ?")
+		uargs = append(uargs, "")
+	}
 	if hasColumn(tx, "bookings", "updated_at") {
 		updates = append(updates, "updated_at = ?")
 		uargs = append(uargs, time.Now())
@@ -248,12 +341,6 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal update booking: " + err.Error()})
 			return
 		}
-	}
-
-	// Sinkronkan data perjalanan (tarif/penumpang) segera setelah masuk tahap validasi
-	if err := SyncConfirmedRegulerBooking(tx, bookingID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "bukti tersimpan, tapi gagal sync data perjalanan: " + err.Error()})
-		return
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -271,7 +358,7 @@ func SubmitRegulerPaymentProof(c *gin.Context) {
 
 // ===============================
 // POST /api/reguler/bookings/:id/confirm-cash
-	// Cash: langsung Lunas => trigger SyncConfirmedRegulerBookingTx(tx, bookingID)
+// Cash: langsung Lunas => trigger SyncConfirmedRegulerBookingTx(tx, bookingID)
 // ===============================
 
 func ConfirmRegulerCash(c *gin.Context) {
@@ -318,8 +405,18 @@ func ConfirmRegulerCash(c *gin.Context) {
 	}
 
 	// Trigger auto-sync modul-modul setelah Lunas
-	if err := SyncConfirmedRegulerBookingTx(tx, bookingID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal sync data perjalanan: " + err.Error()})
+	tripRole := ""
+	if hasColumn(tx, "bookings", "trip_role") {
+		_ = tx.QueryRow(`SELECT COALESCE(trip_role,'') FROM bookings WHERE id=? LIMIT 1`, bookingID).Scan(&tripRole)
+	}
+	var syncErr error
+	if strings.EqualFold(tripRole, "kepulangan") {
+		syncErr = SyncReturnBooking(tx, bookingID)
+	} else {
+		syncErr = SyncConfirmedRegulerBookingTx(tx, bookingID)
+	}
+	if syncErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "gagal sync data perjalanan: " + syncErr.Error()})
 		return
 	}
 

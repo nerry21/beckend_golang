@@ -1,4 +1,3 @@
-// backend/handlers/departure_settings.go
 package handlers
 
 import (
@@ -437,6 +436,18 @@ func CreateDepartureSetting(c *gin.Context) {
 	// バ. Sync ke trips (laporan keuangan) supaya finansial ikut terisi
 	go syncDepartureToTrips(input)
 
+	// ✅ ambil data terbaru dari DB untuk kebutuhan sync (booking_id/trip_number bisa tidak ada di payload)
+	syncDep := input
+	if dep, derr := getDepartureSettingForSyncByID(input.ID); derr == nil {
+		syncDep = dep
+	}
+
+	go func(dep DepartureSetting) {
+		if err := SyncAfterDepartureBerangkat(dep); err != nil {
+			log.Println("[SYNC BERANGKAT] error:", err)
+		}
+	}(syncDep)
+
 	c.JSON(http.StatusCreated, input)
 }
 
@@ -444,7 +455,7 @@ func CreateDepartureSetting(c *gin.Context) {
 func UpdateDepartureSetting(c *gin.Context) {
 	idParam := c.Param("id")
 	id, err := strconv.Atoi(idParam)
-	if err != nil {
+	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id tidak valid"})
 		return
 	}
@@ -462,7 +473,86 @@ func UpdateDepartureSetting(c *gin.Context) {
 		return
 	}
 
-	count, _ := strconv.Atoi(input.PassengerCount)
+	// ✅ FIX UTAMA:
+	// UI saat klik "Berangkat" sering hanya mengirim sebagian field (atau field lain kosong).
+	// Jika kita UPDATE langsung pakai `input`, maka kolom penting (seat_numbers, booking_id, pickup_address, dll)
+	// bisa ketimpa jadi kosong/0 → SyncAfterDepartureBerangkat gagal → passengers & trip_information jadi kosong.
+	existing, eerr := getDepartureSettingForSyncByID(id)
+	if eerr != nil {
+		if eerr == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "data tidak ditemukan"})
+			return
+		}
+		log.Println("UpdateDepartureSetting load existing error:", eerr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "gagal membaca data existing: " + eerr.Error()})
+		return
+	}
+
+	// merge: hanya overwrite jika payload mengisi nilai non-kosong (bookingId hanya jika >0)
+	merged := existing
+
+	if strings.TrimSpace(input.BookingName) != "" {
+		merged.BookingName = input.BookingName
+	}
+	if strings.TrimSpace(input.Phone) != "" {
+		merged.Phone = input.Phone
+	}
+	if strings.TrimSpace(input.PickupAddress) != "" {
+		merged.PickupAddress = input.PickupAddress
+	}
+	if strings.TrimSpace(input.DepartureDate) != "" {
+		merged.DepartureDate = input.DepartureDate
+	}
+	if strings.TrimSpace(input.SeatNumbers) != "" {
+		merged.SeatNumbers = input.SeatNumbers
+	}
+	if strings.TrimSpace(input.PassengerCount) != "" {
+		merged.PassengerCount = input.PassengerCount
+	}
+	if strings.TrimSpace(input.ServiceType) != "" {
+		merged.ServiceType = input.ServiceType
+	}
+	if strings.TrimSpace(input.DriverName) != "" {
+		merged.DriverName = input.DriverName
+	}
+	if strings.TrimSpace(input.VehicleCode) != "" {
+		merged.VehicleCode = input.VehicleCode
+	}
+	if strings.TrimSpace(input.VehicleType) != "" {
+		merged.VehicleType = input.VehicleType
+	}
+	if strings.TrimSpace(input.SuratJalanFile) != "" {
+		merged.SuratJalanFile = input.SuratJalanFile
+	}
+	if strings.TrimSpace(input.SuratJalanFileName) != "" {
+		merged.SuratJalanFileName = input.SuratJalanFileName
+	}
+	if strings.TrimSpace(input.DepartureStatus) != "" {
+		merged.DepartureStatus = input.DepartureStatus
+	}
+
+	// kolom tambahan opsional
+	if strings.TrimSpace(input.DepartureTime) != "" {
+		merged.DepartureTime = input.DepartureTime
+	}
+	if strings.TrimSpace(input.RouteFrom) != "" {
+		merged.RouteFrom = input.RouteFrom
+	}
+	if strings.TrimSpace(input.RouteTo) != "" {
+		merged.RouteTo = input.RouteTo
+	}
+	if strings.TrimSpace(input.TripNumber) != "" {
+		merged.TripNumber = input.TripNumber
+	}
+
+	// booking_id: hanya update kalau benar-benar dikirim valid (>0)
+	if input.BookingID > 0 {
+		merged.BookingID = input.BookingID
+	}
+
+	// normalisasi passenger_count
+	count, _ := strconv.Atoi(strings.TrimSpace(merged.PassengerCount))
+	merged.PassengerCount = strconv.Itoa(count)
 
 	sets := []string{}
 	args := []any{}
@@ -470,23 +560,23 @@ func UpdateDepartureSetting(c *gin.Context) {
 	// base kolom
 	if hasColumn(config.DB, table, "booking_name") {
 		sets = append(sets, "booking_name=?")
-		args = append(args, input.BookingName)
+		args = append(args, merged.BookingName)
 	}
 	if hasColumn(config.DB, table, "phone") {
 		sets = append(sets, "phone=?")
-		args = append(args, input.Phone)
+		args = append(args, merged.Phone)
 	}
 	if hasColumn(config.DB, table, "pickup_address") {
 		sets = append(sets, "pickup_address=?")
-		args = append(args, input.PickupAddress)
+		args = append(args, merged.PickupAddress)
 	}
 	if hasColumn(config.DB, table, "departure_date") {
 		sets = append(sets, "departure_date=?")
-		args = append(args, nullIfEmpty(input.DepartureDate))
+		args = append(args, nullIfEmpty(merged.DepartureDate))
 	}
 	if hasColumn(config.DB, table, "seat_numbers") {
 		sets = append(sets, "seat_numbers=?")
-		args = append(args, input.SeatNumbers)
+		args = append(args, merged.SeatNumbers)
 	}
 	if hasColumn(config.DB, table, "passenger_count") {
 		sets = append(sets, "passenger_count=?")
@@ -494,61 +584,65 @@ func UpdateDepartureSetting(c *gin.Context) {
 	}
 	if hasColumn(config.DB, table, "service_type") {
 		sets = append(sets, "service_type=?")
-		args = append(args, input.ServiceType)
+		args = append(args, merged.ServiceType)
 	}
 	if hasColumn(config.DB, table, "driver_name") {
 		sets = append(sets, "driver_name=?")
-		args = append(args, input.DriverName)
+		args = append(args, merged.DriverName)
 	}
 	if hasColumn(config.DB, table, "vehicle_code") {
 		sets = append(sets, "vehicle_code=?")
-		args = append(args, input.VehicleCode)
+		args = append(args, merged.VehicleCode)
 	}
 	if hasColumn(config.DB, table, "vehicle_type") {
 		sets = append(sets, "vehicle_type=?")
-		args = append(args, input.VehicleType)
+		args = append(args, merged.VehicleType)
 	}
 	if hasColumn(config.DB, table, "surat_jalan_file") {
 		sets = append(sets, "surat_jalan_file=?")
-		args = append(args, input.SuratJalanFile)
+		args = append(args, merged.SuratJalanFile)
 	}
 	if hasColumn(config.DB, table, "surat_jalan_file_name") {
 		sets = append(sets, "surat_jalan_file_name=?")
-		args = append(args, input.SuratJalanFileName)
+		args = append(args, merged.SuratJalanFileName)
 	}
 	if hasColumn(config.DB, table, "departure_status") {
 		sets = append(sets, "departure_status=?")
-		args = append(args, input.DepartureStatus)
+		args = append(args, merged.DepartureStatus)
 	}
 
 	// kolom tambahan opsional
 	if hasColumn(config.DB, table, "departure_time") {
 		sets = append(sets, "departure_time=?")
-		args = append(args, nullIfEmpty(input.DepartureTime))
+		args = append(args, nullIfEmpty(merged.DepartureTime))
 	}
 	if hasColumn(config.DB, table, "route_from") {
 		sets = append(sets, "route_from=?")
-		args = append(args, input.RouteFrom)
+		args = append(args, merged.RouteFrom)
 	}
 	if hasColumn(config.DB, table, "route_to") {
 		sets = append(sets, "route_to=?")
-		args = append(args, input.RouteTo)
+		args = append(args, merged.RouteTo)
 	}
 	if hasColumn(config.DB, table, "trip_number") {
 		sets = append(sets, "trip_number=?")
-		args = append(args, input.TripNumber)
+		args = append(args, merged.TripNumber)
 	}
+
+	// booking_id: jangan di-null-kan karena payload 0; pakai merged.BookingID
 	if hasColumn(config.DB, table, "booking_id") {
 		sets = append(sets, "booking_id=NULLIF(?,0)")
-		args = append(args, input.BookingID)
+		args = append(args, merged.BookingID)
 	}
+
 	if hasColumn(config.DB, table, "updated_at") {
 		sets = append(sets, "updated_at=?")
 		args = append(args, time.Now())
 	}
 
 	if len(sets) == 0 {
-		c.JSON(http.StatusOK, input)
+		merged.ID = id
+		c.JSON(http.StatusOK, merged)
 		return
 	}
 
@@ -560,15 +654,26 @@ func UpdateDepartureSetting(c *gin.Context) {
 		return
 	}
 
-	input.ID = id
-	input.PassengerCount = strconv.Itoa(count)
+	merged.ID = id
+	merged.PassengerCount = strconv.Itoa(count)
+
+	// ✅ ambil data terbaru dari DB untuk kebutuhan sync (setelah UPDATE)
+	syncDep := merged
+	if dep, derr := getDepartureSettingForSyncByID(id); derr == nil {
+		syncDep = dep
+	}
 
 	// バ. Sync ke akun driver (best effort, tidak blokir respon)
-	go syncDepartureToDriverAccount(input)
+	go syncDepartureToDriverAccount(syncDep)
 	// バ. Sync ke trips (laporan keuangan) supaya finansial ikut terisi
-	go syncDepartureToTrips(input)
+	go syncDepartureToTrips(syncDep)
+	go func(dep DepartureSetting) {
+		if err := SyncAfterDepartureBerangkat(dep); err != nil {
+			log.Println("[SYNC BERANGKAT] error:", err)
+		}
+	}(syncDep)
 
-	c.JSON(http.StatusOK, input)
+	c.JSON(http.StatusOK, merged)
 }
 
 // DELETE /api/departure-settings/:id
@@ -631,6 +736,124 @@ func getTripESuratJalanDB(q queryRower, tripNo string) string {
 		tripNo,
 	).Scan(&s)
 	return strings.TrimSpace(s.String)
+}
+
+// getDepartureSettingForSyncByID mengambil data departure_settings versi TERBARU dari DB.
+// Tujuan: untuk proses sync (Berangkat) yang membutuhkan booking_id/trip_number yang sering
+// tidak ikut terkirim dari UI saat update.
+func getDepartureSettingForSyncByID(id int) (DepartureSetting, error) {
+	var d DepartureSetting
+	if id <= 0 {
+		return d, fmt.Errorf("id tidak valid")
+	}
+
+	table := "departure_settings"
+	if !hasTable(config.DB, table) {
+		return d, fmt.Errorf("tabel departure_settings tidak ditemukan")
+	}
+
+	// cache driver vehicle type by name (lowercase)
+	driverVehicleMap := loadDriverVehicleTypes()
+
+	tripNoSel := "''"
+	if hasColumn(config.DB, table, "trip_number") {
+		tripNoSel = "COALESCE(trip_number,'')"
+	}
+	bookingIDSel := "0"
+	if hasColumn(config.DB, table, "booking_id") {
+		bookingIDSel = "COALESCE(booking_id,0)"
+	}
+	depTimeSel := "''"
+	if hasColumn(config.DB, table, "departure_time") {
+		depTimeSel = "COALESCE(departure_time,'')"
+	}
+	routeFromSel := "''"
+	if hasColumn(config.DB, table, "route_from") {
+		routeFromSel = "COALESCE(route_from,'')"
+	}
+	routeToSel := "''"
+	if hasColumn(config.DB, table, "route_to") {
+		routeToSel = "COALESCE(route_to,'')"
+	}
+	vehicleTypeSel := "''"
+	if hasColumn(config.DB, table, "vehicle_type") {
+		vehicleTypeSel = "COALESCE(vehicle_type,'')"
+	}
+
+	row := config.DB.QueryRow(fmt.Sprintf(`
+		SELECT
+			id,
+			COALESCE(booking_name,''),
+			COALESCE(phone,''),
+			COALESCE(pickup_address,''),
+			COALESCE(departure_date,''),
+			COALESCE(seat_numbers,''),
+			COALESCE(passenger_count,0),
+			COALESCE(service_type,''),
+			COALESCE(driver_name,''),
+			COALESCE(vehicle_code,''),
+			COALESCE(surat_jalan_file,''),
+			COALESCE(surat_jalan_file_name,''),
+			COALESCE(departure_status,''),
+			COALESCE(created_at,''),
+			%s AS trip_number,
+			%s AS booking_id,
+			%s AS departure_time,
+			%s AS route_from,
+			%s AS route_to,
+			%s AS vehicle_type
+		FROM %s
+		WHERE id=?
+		LIMIT 1
+	`, tripNoSel, bookingIDSel, depTimeSel, routeFromSel, routeToSel, vehicleTypeSel, table), id)
+
+	var countInt int
+	var bookingID int64
+	if err := row.Scan(
+		&d.ID,
+		&d.BookingName,
+		&d.Phone,
+		&d.PickupAddress,
+		&d.DepartureDate,
+		&d.SeatNumbers,
+		&countInt,
+		&d.ServiceType,
+		&d.DriverName,
+		&d.VehicleCode,
+		&d.SuratJalanFile,
+		&d.SuratJalanFileName,
+		&d.DepartureStatus,
+		&d.CreatedAt,
+		&d.TripNumber,
+		&bookingID,
+		&d.DepartureTime,
+		&d.RouteFrom,
+		&d.RouteTo,
+		&d.VehicleType,
+	); err != nil {
+		return d, err
+	}
+
+	d.BookingID = bookingID
+	d.PassengerCount = strconv.Itoa(countInt)
+
+	// ✅ Auto isi Surat Jalan bila kosong (dari trip_information / fallback booking)
+	if strings.TrimSpace(d.SuratJalanFile) == "" {
+		if s := strings.TrimSpace(getTripESuratJalanDB(config.DB, d.TripNumber)); s != "" {
+			d.SuratJalanFile = s
+		} else if d.BookingID > 0 {
+			d.SuratJalanFile = buildSuratJalanAPI(d.BookingID)
+		}
+	}
+
+	// fallback jenis kendaraan dari tabel drivers (jika kolom kosong)
+	if strings.TrimSpace(d.VehicleType) == "" && strings.TrimSpace(d.DriverName) != "" {
+		if vt := driverVehicleMap[strings.ToLower(strings.TrimSpace(d.DriverName))]; vt != "" {
+			d.VehicleType = vt
+		}
+	}
+
+	return d, nil
 }
 
 // syncDepartureToDriverAccount menyalin data pengaturan keberangkatan ke driver_accounts.
@@ -992,6 +1215,8 @@ func syncDepartureToTrips(dep DepartureSetting) {
 			args = append(args, existingID)
 			_, _ = config.DB.Exec(`UPDATE `+table+` SET `+strings.Join(setParts, ", ")+` WHERE id=?`, args...)
 		}
+		// isi kategori kepulangan untuk trip sebelumnya jika kosong
+		patchReturnCategoryForPreviousTrip(carCode, driverName, day, month, year, depCategory)
 		return
 	}
 
@@ -1021,6 +1246,8 @@ func syncDepartureToTrips(dep DepartureSetting) {
 		0, 0, 0, 0, 0, paymentStatus,
 		nil, nil,
 	)
+	// isi kategori kepulangan untuk trip sebelumnya jika kosong
+	patchReturnCategoryForPreviousTrip(carCode, driverName, day, month, year, depCategory)
 }
 
 // loadDriverVehicleTypes memuat map nama driver (lowercase) -> vehicle_type dari tabel drivers
@@ -1056,3 +1283,51 @@ func lookupDriverVehicleType(name string) string {
 	).Scan(&vt)
 	return strings.TrimSpace(vt.String)
 }
+
+// patchReturnCategoryForPreviousTrip mengisi ret_category trip sebelumnya (car_code + driver sama, tanggal <= ini) jika masih kosong.
+func patchReturnCategoryForPreviousTrip(carCode, driverName string, day, month, year int, category string) {
+	table := "trips"
+	if strings.TrimSpace(category) == "" || !hasTable(config.DB, table) || !hasColumn(config.DB, table, "ret_category") {
+		return
+	}
+
+	car := strings.ToUpper(strings.TrimSpace(carCode))
+	if car == "" {
+		return
+	}
+	driver := strings.TrimSpace(driverName)
+
+	where := []string{"UPPER(car_code) = ?"}
+	args := []any{car}
+
+	if driver != "" && hasColumn(config.DB, table, "driver_name") {
+		where = append(where, "TRIM(driver_name) = ?")
+		args = append(args, driver)
+	}
+
+	if hasColumn(config.DB, table, "year") && hasColumn(config.DB, table, "month") && hasColumn(config.DB, table, "day") {
+		where = append(where, "(year < ? OR (year = ? AND (month < ? OR (month = ? AND day <= ?))))")
+		args = append(args, year, year, month, month, day)
+	}
+
+	q := `SELECT id, COALESCE(ret_category,'') FROM ` + table + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY year DESC, month DESC, day DESC, id DESC LIMIT 1`
+
+	var id int64
+	var existingCat string
+	if err := config.DB.QueryRow(q, args...).Scan(&id, &existingCat); err != nil || id == 0 {
+		return
+	}
+	if strings.TrimSpace(existingCat) != "" {
+		return
+	}
+
+	_, _ = config.DB.Exec(`UPDATE `+table+` SET ret_category=? WHERE id=?`, category, id)
+}
+
+// =====================
+// Sync Berangkat -> passengers & trip_information
+// =====================
+
+// syncDepartureToPassengersAndTripInformation sudah digantikan dengan SyncAfterDepartureBerangkat di departure_berangkat_sync.go.
+// Dibiarkan kosong untuk kompatibilitas lama; jangan dipanggil lagi.
+// func syncDepartureToPassengersAndTripInformation(dep DepartureSetting) {}

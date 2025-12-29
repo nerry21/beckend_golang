@@ -200,6 +200,15 @@ func main() {
 		api.DELETE("/departure-settings/:id", handlers.DeleteDepartureSetting)
 
 		// ============================
+		// PENGATURAN KEPULANGAN
+		// ============================
+		api.GET("/return-settings", handlers.GetReturnSettings)
+		api.GET("/return-settings/:id", handlers.GetReturnSettingByID)
+		api.POST("/return-settings", handlers.CreateReturnSetting)
+		api.PUT("/return-settings/:id", handlers.UpdateReturnSetting)
+		api.DELETE("/return-settings/:id", handlers.DeleteReturnSetting)
+
+		// ============================
 		// AKUN DRIVER
 		// ============================
 		api.GET("/driver-accounts", handlers.GetDriverAccounts)
