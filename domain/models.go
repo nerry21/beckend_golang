@@ -29,9 +29,9 @@ type Trip struct {
 
 	OtherIncome int64 `json:"otherIncome"`
 
-	BBMFee      int64 `json:"bbmFee"`
-	MealFee     int64 `json:"mealFee"`
-	CourierFee  int64 `json:"courierFee"`
+	BBMFee       int64 `json:"bbmFee"`
+	MealFee      int64 `json:"mealFee"`
+	CourierFee   int64 `json:"courierFee"`
 	TolParkirFee int64 `json:"tolParkirFee"`
 
 	PaymentStatus string `json:"paymentStatus"`
@@ -46,10 +46,10 @@ type TripWithCalc struct {
 }
 
 type VehicleCostMonthly struct {
-	CarCode string `json:"carCode"`
+	CarCode    string `json:"carCode"`
 	DriverName string `json:"driverName"`
-	Year   int `json:"year"`
-	Month  int `json:"month"`
+	Year       int    `json:"year"`
+	Month      int    `json:"month"`
 
 	MaintenanceFee int64 `json:"maintenanceFee"`
 	InsuranceFee   int64 `json:"insuranceFee"`
@@ -60,10 +60,10 @@ type CompanyExpenseMonthly struct {
 	Year  int `json:"year"`
 	Month int `json:"month"`
 
-	StaffFee   int64 `json:"staffFee"`
-	OfficeFee  int64 `json:"officeFee"`
+	StaffFee    int64 `json:"staffFee"`
+	OfficeFee   int64 `json:"officeFee"`
 	InternetFee int64 `json:"internetFee"`
-	PromoFee   int64 `json:"promoFee"`
-	FlyerFee   int64 `json:"flyerFee"`
-	LegalFee   int64 `json:"legalFee"`
+	PromoFee    int64 `json:"promoFee"`
+	FlyerFee    int64 `json:"flyerFee"`
+	LegalFee    int64 `json:"legalFee"`
 }

@@ -465,4 +465,3 @@ func buildOrderNumberForTrip(carCode string, day, month, year int) string {
 
 	return fmt.Sprintf("LKT/%02d/%s", seq, cc)
 }
-

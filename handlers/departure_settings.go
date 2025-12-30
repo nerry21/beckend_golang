@@ -738,6 +738,16 @@ func getTripESuratJalanDB(q queryRower, tripNo string) string {
 	return strings.TrimSpace(s.String)
 }
 
+// GetDepartureSettingForSyncByID exposes the latest departure_settings row for reuse in new layers.
+func GetDepartureSettingForSyncByID(id int) (DepartureSetting, error) {
+	return getDepartureSettingForSyncByID(id)
+}
+
+// LoadDriverVehicleTypes exposes the driver vehicle type cache for reuse.
+func LoadDriverVehicleTypes() map[string]string {
+	return loadDriverVehicleTypes()
+}
+
 // getDepartureSettingForSyncByID mengambil data departure_settings versi TERBARU dari DB.
 // Tujuan: untuk proses sync (Berangkat) yang membutuhkan booking_id/trip_number yang sering
 // tidak ikut terkirim dari UI saat update.

@@ -2,7 +2,6 @@
 package handlers
 
 import (
-	"backend/config"
 	"bytes"
 	"database/sql"
 	"fmt"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"backend/config"
 
 	"github.com/gin-gonic/gin"
 	"github.com/phpdave11/gofpdf"
@@ -37,6 +38,24 @@ type PassengerDocData struct {
 	DriverName  string
 
 	PricePerSeat int64
+}
+
+// GeneratePassengerETicket membuat PDF e-ticket (bytes, filename) untuk satu passenger.
+func GeneratePassengerETicket(passengerID int64) ([]byte, string, error) {
+	data, err := loadPassengerDocData(passengerID)
+	if err != nil {
+		return nil, "", err
+	}
+	return buildETicketPDF(data)
+}
+
+// GeneratePassengerInvoice membuat PDF invoice (bytes, filename) untuk satu passenger.
+func GeneratePassengerInvoice(passengerID int64) ([]byte, string, error) {
+	data, err := loadPassengerDocData(passengerID)
+	if err != nil {
+		return nil, "", err
+	}
+	return buildInvoicePDF(data)
 }
 
 func GetPassengerETicketPDF(c *gin.Context) {
@@ -95,20 +114,21 @@ func loadPassengerDocData(passengerID int64) (PassengerDocData, error) {
 	}
 
 	var (
-		bookingID                          sql.NullInt64
-		name, phone, seats                 sql.NullString
-		dateStr, timeStr                   sql.NullString
-		pickup, dropoff                    sql.NullString
-		serviceType, driverName, vehicle   sql.NullString
+		bookingID                        sql.NullInt64
+		name, phone, seats               sql.NullString
+		dateStr, timeStr                 sql.NullString
+		pickup, dropoff                  sql.NullString
+		serviceType, driverName, vehicle sql.NullString
+		total                            sql.NullInt64
 	)
 
 	err := config.DB.QueryRow(`
-		SELECT booking_id, passenger_name, passenger_phone, selected_seats, date, departure_time, pickup_address, dropoff_address, service_type, driver_name, vehicle_code
+		SELECT booking_id, passenger_name, passenger_phone, selected_seats, date, departure_time, pickup_address, dropoff_address, service_type, driver_name, vehicle_code, COALESCE(total_amount,0)
 		FROM passengers
 		WHERE id=?
 		LIMIT 1
 	`, passengerID).Scan(
-		&bookingID, &name, &phone, &seats, &dateStr, &timeStr, &pickup, &dropoff, &serviceType, &driverName, &vehicle,
+		&bookingID, &name, &phone, &seats, &dateStr, &timeStr, &pickup, &dropoff, &serviceType, &driverName, &vehicle, &total,
 	)
 	if err != nil {
 		return out, err
@@ -129,6 +149,9 @@ func loadPassengerDocData(passengerID int64) (PassengerDocData, error) {
 	out.ServiceType = strings.TrimSpace(serviceType.String)
 	out.DriverName = strings.TrimSpace(driverName.String)
 	out.VehicleCode = strings.TrimSpace(vehicle.String)
+	if total.Valid && total.Int64 > 0 {
+		out.PricePerSeat = total.Int64
+	}
 
 	// route & trip detail dari booking_seats (per seat)
 	if hasTable(config.DB, "booking_seats") && hasColumn(config.DB, "booking_seats", "seat_code") {
@@ -153,7 +176,9 @@ func loadPassengerDocData(passengerID int64) (PassengerDocData, error) {
 	}
 
 	// harga per seat dari bookings/reguler_bookings jika ada
-	out.PricePerSeat = loadPricePerSeat(out.BookingID)
+	if out.PricePerSeat == 0 {
+		out.PricePerSeat = loadPricePerSeat(out.BookingID)
+	}
 	return out, nil
 }
 
@@ -171,22 +196,38 @@ func loadPricePerSeat(bookingID int64) int64 {
 		return 0
 	}
 
-	priceCol := ""
+	// prioritas: price_per_seat, fallback bagi total/jumlah seat
 	if hasColumn(config.DB, table, "price_per_seat") {
-		priceCol = "price_per_seat"
-	} else if hasColumn(config.DB, table, "pricePerSeat") {
-		priceCol = "pricePerSeat"
-	}
-	if priceCol == "" {
-		return 0
+		var v sql.NullInt64
+		if err := config.DB.QueryRow(`SELECT price_per_seat FROM `+table+` WHERE id=? LIMIT 1`, bookingID).Scan(&v); err == nil && v.Valid && v.Int64 > 0 {
+			return v.Int64
+		}
 	}
 
-	var v sql.NullInt64
-	if err := config.DB.QueryRow(`SELECT `+priceCol+` FROM `+table+` WHERE id=? LIMIT 1`, bookingID).Scan(&v); err != nil {
+	// fallback: total / jumlah seat di booking
+	var total sql.NullInt64
+	_ = config.DB.QueryRow(`SELECT COALESCE(total,0) FROM `+table+` WHERE id=? LIMIT 1`, bookingID).Scan(&total)
+
+	seatCount := countBookingSeats(bookingID)
+	if total.Valid && total.Int64 > 0 && seatCount > 0 {
+		return total.Int64 / int64(seatCount)
+	}
+	if total.Valid {
+		return total.Int64
+	}
+	return 0
+}
+
+func countBookingSeats(bookingID int64) int {
+	if bookingID <= 0 {
 		return 0
 	}
-	if v.Valid && v.Int64 > 0 {
-		return v.Int64
+	if hasTable(config.DB, "booking_seats") && hasColumn(config.DB, "booking_seats", "booking_id") {
+		var c sql.NullInt64
+		_ = config.DB.QueryRow(`SELECT COUNT(*) FROM booking_seats WHERE booking_id=?`, bookingID).Scan(&c)
+		if c.Valid && c.Int64 > 0 {
+			return int(c.Int64)
+		}
 	}
 	return 0
 }

@@ -44,7 +44,7 @@ func GetDriverAccounts(c *gin.Context) {
 		SELECT
 			id,
 			COALESCE(driver_name,''),
-			`+vtSel+`,
+			` + vtSel + `,
 			COALESCE(booking_name,''),
 			COALESCE(phone,''),
 			COALESCE(pickup_address, ''),

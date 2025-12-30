@@ -12,7 +12,7 @@ type API struct {
 }
 
 type VehicleCostMonthly struct {
-	ID            int64  `json:"id"`
+	ID             int64  `json:"id"`
 	CarCode        string `json:"carCode"`
 	DriverName     string `json:"driverName"`
 	Year           int    `json:"year"`

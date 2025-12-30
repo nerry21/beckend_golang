@@ -1055,19 +1055,19 @@ func GetRegulerSuratJalan(c *gin.Context) {
 		}
 
 		c.JSON(http.StatusOK, RegulerSuratJalanResponse{
-			BookingID:       id64, // booking yg diminta, tetapi isi passenger gabungan
-			RouteFrom:       routeFrom,
-			RouteTo:         routeTo,
-			TripDate:        tripDate,
-			TripTime:        tripTime,
-			PickupLocation:  "", // gabungan → per penumpang
-			DropoffLocation: "",
-			PricePerSeat:    0,
-			Total:           sumTotal,
-			PassengerPhone:  "",
-			PaymentStatus:   "",
-			Passengers:      passengers,
-			Scope:           "trip",
+			BookingID:        id64, // booking yg diminta, tetapi isi passenger gabungan
+			RouteFrom:        routeFrom,
+			RouteTo:          routeTo,
+			TripDate:         tripDate,
+			TripTime:         tripTime,
+			PickupLocation:   "", // gabungan → per penumpang
+			DropoffLocation:  "",
+			PricePerSeat:     0,
+			Total:            sumTotal,
+			PassengerPhone:   "",
+			PaymentStatus:    "",
+			Passengers:       passengers,
+			Scope:            "trip",
 			TripBookingCount: len(bookings),
 		})
 		return

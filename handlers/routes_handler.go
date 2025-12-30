@@ -1,28 +1,28 @@
 package handlers
 
 import (
-    "database/sql"
-    "net/http"
+	"database/sql"
+	"net/http"
 
-    "backend/config" // GANTI kalau nama module kamu bukan "backend"
-    "github.com/gin-gonic/gin"
+	"backend/config" // GANTI kalau nama module kamu bukan "backend"
+	"github.com/gin-gonic/gin"
 )
 
 // struct untuk respon JSON ke frontend
 type Route struct {
-    ID              uint    `json:"id"`
-    ServiceTypeID   uint8   `json:"service_type_id"`
-    ServiceTypeCode string  `json:"service_type_code"`
-    ServiceTypeName string  `json:"service_type_name"`
-    Origin          string  `json:"origin"`
-    Destination     string  `json:"destination"`
-    BasePrice       float64 `json:"base_price"`
-    Description     *string `json:"description,omitempty"`
+	ID              uint    `json:"id"`
+	ServiceTypeID   uint8   `json:"service_type_id"`
+	ServiceTypeCode string  `json:"service_type_code"`
+	ServiceTypeName string  `json:"service_type_name"`
+	Origin          string  `json:"origin"`
+	Destination     string  `json:"destination"`
+	BasePrice       float64 `json:"base_price"`
+	Description     *string `json:"description,omitempty"`
 }
 
 // GET /api/routes
 func GetRoutes(c *gin.Context) {
-    query := `
+	query := `
         SELECT 
             r.id,
             r.service_type_id,
@@ -37,55 +37,55 @@ func GetRoutes(c *gin.Context) {
         ORDER BY r.id DESC
     `
 
-    rows, err := config.DB.Query(query)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{
-            "error": "gagal mengambil data routes: " + err.Error(),
-        })
-        return
-    }
-    defer rows.Close()
+	rows, err := config.DB.Query(query)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "gagal mengambil data routes: " + err.Error(),
+		})
+		return
+	}
+	defer rows.Close()
 
-    // penting: inisialisasi slice kosong, bukan nil
-    routes := make([]Route, 0)
+	// penting: inisialisasi slice kosong, bukan nil
+	routes := make([]Route, 0)
 
-    for rows.Next() {
-        var rt Route
-        var desc sql.NullString
+	for rows.Next() {
+		var rt Route
+		var desc sql.NullString
 
-        // scan database row ke struct
-        if err := rows.Scan(
-            &rt.ID,
-            &rt.ServiceTypeID,
-            &rt.ServiceTypeCode,
-            &rt.ServiceTypeName,
-            &rt.Origin,
-            &rt.Destination,
-            &rt.BasePrice,
-            &desc,
-        ); err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{
-                "error": "gagal membaca data route: " + err.Error(),
-            })
-            return
-        }
+		// scan database row ke struct
+		if err := rows.Scan(
+			&rt.ID,
+			&rt.ServiceTypeID,
+			&rt.ServiceTypeCode,
+			&rt.ServiceTypeName,
+			&rt.Origin,
+			&rt.Destination,
+			&rt.BasePrice,
+			&desc,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "gagal membaca data route: " + err.Error(),
+			})
+			return
+		}
 
-        if desc.Valid {
-            rt.Description = &desc.String
-        } else {
-            rt.Description = nil
-        }
+		if desc.Valid {
+			rt.Description = &desc.String
+		} else {
+			rt.Description = nil
+		}
 
-        routes = append(routes, rt)
-    }
+		routes = append(routes, rt)
+	}
 
-    if err := rows.Err(); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{
-            "error": "error saat iterasi data: " + err.Error(),
-        })
-        return
-    }
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "error saat iterasi data: " + err.Error(),
+		})
+		return
+	}
 
-    // kirim semua routes sebagai JSON
-    c.JSON(http.StatusOK, routes)
+	// kirim semua routes sebagai JSON
+	c.JSON(http.StatusOK, routes)
 }

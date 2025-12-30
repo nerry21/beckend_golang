@@ -431,6 +431,24 @@ func berangkatUpsertTripInformation(tx *sql.Tx, ds DepartureSetting, p BookingSy
 		suratJalan = buildSuratJalanAPI(ds.BookingID)
 	}
 
+	hasTripNumber := hasColumn(tx, "trip_information", "trip_number")
+	if !hasTripNumber {
+		// tanpa trip_number tidak bisa upsert, skip tanpa mematikan flow penumpang
+		log.Println("[BERANGKAT SYNC] skip trip_information: kolom trip_number tidak ada")
+		return nil
+	}
+
+	// cek kolom lain yang ada
+	hasTripDetails := hasColumn(tx, "trip_information", "trip_details")
+	hasDepartureDate := hasColumn(tx, "trip_information", "departure_date")
+	hasDepartureTime := hasColumn(tx, "trip_information", "departure_time")
+	hasDriver := hasColumn(tx, "trip_information", "driver_name")
+	hasVehicle := hasColumn(tx, "trip_information", "vehicle_code")
+	hasSurat := hasColumn(tx, "trip_information", "e_surat_jalan")
+	hasCreated := hasColumn(tx, "trip_information", "created_at")
+	hasUpdated := hasColumn(tx, "trip_information", "updated_at")
+	hasBookingID := hasColumn(tx, "trip_information", "booking_id")
+
 	// Upsert by trip_number
 	exists, err := berangkatExistsByTripNumber(tx, "trip_information", tripNumber)
 	if err != nil {
@@ -440,20 +458,57 @@ func berangkatUpsertTripInformation(tx *sql.Tx, ds DepartureSetting, p BookingSy
 	now := time.Now().Format("2006-01-02 15:04:05")
 
 	if !exists {
-		_, err := tx.Exec(`
-			INSERT INTO trip_information
-				(trip_number, trip_details, departure_date, departure_time,
-				 driver_name, vehicle_code,
-				 e_surat_jalan, created_at, updated_at, booking_id)
-			VALUES
-				(?, ?, ?, ?,
-				 ?, ?,
-				 ?, ?, ?, ?)
-		`,
-			tripNumber, tripDetails, depDate, depTime,
-			driverName, vehicleCode,
-			suratJalan, now, now, ds.BookingID,
-		)
+		cols := []string{"trip_number"}
+		vals := []any{tripNumber}
+		ph := []string{"?"}
+
+		if hasTripDetails {
+			cols = append(cols, "trip_details")
+			vals = append(vals, tripDetails)
+			ph = append(ph, "?")
+		}
+		if hasDepartureDate {
+			cols = append(cols, "departure_date")
+			vals = append(vals, depDate)
+			ph = append(ph, "?")
+		}
+		if hasDepartureTime {
+			cols = append(cols, "departure_time")
+			vals = append(vals, depTime)
+			ph = append(ph, "?")
+		}
+		if hasDriver {
+			cols = append(cols, "driver_name")
+			vals = append(vals, driverName)
+			ph = append(ph, "?")
+		}
+		if hasVehicle {
+			cols = append(cols, "vehicle_code")
+			vals = append(vals, vehicleCode)
+			ph = append(ph, "?")
+		}
+		if hasSurat {
+			cols = append(cols, "e_surat_jalan")
+			vals = append(vals, suratJalan)
+			ph = append(ph, "?")
+		}
+		if hasCreated {
+			cols = append(cols, "created_at")
+			vals = append(vals, now)
+			ph = append(ph, "?")
+		}
+		if hasUpdated {
+			cols = append(cols, "updated_at")
+			vals = append(vals, now)
+			ph = append(ph, "?")
+		}
+		if hasBookingID {
+			cols = append(cols, "booking_id")
+			vals = append(vals, ds.BookingID)
+			ph = append(ph, "?")
+		}
+
+		_, err := tx.Exec(`INSERT INTO trip_information (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
 		if err != nil {
 			log.Println("[BERANGKAT SYNC] insert trip_information fail trip:", tripNumber, "err:", err)
 			return fmt.Errorf("insert trip_information failed: %w", err)
@@ -462,23 +517,49 @@ func berangkatUpsertTripInformation(tx *sql.Tx, ds DepartureSetting, p BookingSy
 		return nil
 	}
 
-	_, err = tx.Exec(`
-		UPDATE trip_information
-		SET trip_details=?,
-			departure_date=?,
-			departure_time=?,
-			driver_name=?,
-			vehicle_code=?,
-			e_surat_jalan=?,
-			updated_at=?,
-			booking_id=?
-		WHERE trip_number=?
-	`,
-		tripDetails, depDate, depTime,
-		driverName, vehicleCode,
-		suratJalan, now, ds.BookingID,
-		tripNumber,
-	)
+	setParts := []string{}
+	args := []any{}
+
+	if hasTripDetails {
+		setParts = append(setParts, "trip_details=?")
+		args = append(args, tripDetails)
+	}
+	if hasDepartureDate {
+		setParts = append(setParts, "departure_date=?")
+		args = append(args, depDate)
+	}
+	if hasDepartureTime {
+		setParts = append(setParts, "departure_time=?")
+		args = append(args, depTime)
+	}
+	if hasDriver {
+		setParts = append(setParts, "driver_name=?")
+		args = append(args, driverName)
+	}
+	if hasVehicle {
+		setParts = append(setParts, "vehicle_code=?")
+		args = append(args, vehicleCode)
+	}
+	if hasSurat {
+		setParts = append(setParts, "e_surat_jalan=?")
+		args = append(args, suratJalan)
+	}
+	if hasBookingID {
+		setParts = append(setParts, "booking_id=?")
+		args = append(args, ds.BookingID)
+	}
+	if hasUpdated && len(setParts) > 0 {
+		setParts = append(setParts, "updated_at=?")
+		args = append(args, now)
+	}
+
+	if len(setParts) == 0 {
+		return nil
+	}
+
+	args = append(args, tripNumber)
+
+	_, err = tx.Exec(`UPDATE trip_information SET `+strings.Join(setParts, ", ")+` WHERE trip_number=?`, args...)
 	if err != nil {
 		log.Println("[BERANGKAT SYNC] update trip_information fail trip:", tripNumber, "err:", err)
 		return fmt.Errorf("update trip_information failed: %w", err)

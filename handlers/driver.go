@@ -10,10 +10,10 @@ import (
 )
 
 type Driver struct {
-	ID              int    `json:"id"`
-	Name            string `json:"name"`
-	Phone           string `json:"phone"`
-	Role            string `json:"role"`
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Phone string `json:"phone"`
+	Role  string `json:"role"`
 
 	// ✅ kolom baru (DB: vehicle_type)
 	VehicleType string `json:"vehicleType"`

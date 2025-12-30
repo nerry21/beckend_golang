@@ -331,7 +331,6 @@ func findDriverVehicleByTrip(dateStr, timeStr, from, to string) (string, string)
 	return driver, vehicle
 }
 
-
 // POST /api/passengers
 func CreatePassenger(c *gin.Context) {
 	var input Passenger
