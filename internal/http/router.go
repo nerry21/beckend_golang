@@ -20,6 +20,7 @@ func NewRouter(env intconfig.Env) *gin.Engine {
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("warning: failed to set trusted proxies: %v", err)
 	}
+	h.SetRouter(r)
 
 	r.OPTIONS("/*path", func(c *gin.Context) { c.AbortWithStatus(stdhttp.StatusNoContent) })
 

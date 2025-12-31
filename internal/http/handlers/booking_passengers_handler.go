@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	intconfig "backend/internal/config"
+	intdb "backend/internal/db"
 	"backend/internal/utils"
 
 	"github.com/gin-gonic/gin"
@@ -74,10 +75,10 @@ func GetBookingPassengers(c *gin.Context) {
 
 	// map per-seat dari booking_passengers
 	passengerMap := map[string]bookingPassengerResponse{}
-	withPassengerPhone := utils.HasColumn(db, "booking_passengers", "passenger_phone")
-	withPaidPrice := utils.HasColumn(db, "booking_passengers", "paid_price")
+	withPassengerPhone := intdb.HasColumn(db, "booking_passengers", "passenger_phone")
+	withPaidPrice := intdb.HasColumn(db, "booking_passengers", "paid_price")
 
-	if utils.HasTable(db, "booking_passengers") {
+	if intdb.HasTable(db, "booking_passengers") {
 		phoneSel := "''"
 		if withPassengerPhone {
 			phoneSel = "COALESCE(passenger_phone,'')"

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"backend/config"
-	"backend/utils"
+	intconfig "backend/internal/config"
+	intdb "backend/internal/db"
 )
 
 type TripInformation struct {
@@ -31,7 +31,7 @@ type TripInformationRepository struct {
 // Menghindari overwrite nilai kosong; hanya field yang terisi yang di-set.
 func (r TripInformationRepository) Upsert(info TripInformation) error {
 	table := "trip_information"
-	if !utils.HasTable(config.DB, table) {
+	if !intdb.HasTable(intconfig.DB, table) {
 		return nil
 	}
 
@@ -41,8 +41,8 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 	}
 
 	var existingID int64
-	if utils.HasColumn(config.DB, table, "trip_number") {
-		_ = config.DB.QueryRow(`SELECT id FROM `+table+` WHERE trip_number=? LIMIT 1`, tripNumber).Scan(&existingID)
+	if intdb.HasColumn(intconfig.DB, table, "trip_number") {
+		_ = intconfig.DB.QueryRow(`SELECT id FROM `+table+` WHERE trip_number=? LIMIT 1`, tripNumber).Scan(&existingID)
 	}
 
 	now := time.Now()
@@ -62,7 +62,7 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 					return
 				}
 			}
-			if utils.HasColumn(config.DB, table, col) {
+			if intdb.HasColumn(intconfig.DB, table, col) {
 				cols = append(cols, col)
 				vals = append(vals, val)
 			}
@@ -78,11 +78,11 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 		if info.BookingID > 0 {
 			add("booking_id", info.BookingID)
 		}
-		if utils.HasColumn(config.DB, table, "created_at") {
+		if intdb.HasColumn(intconfig.DB, table, "created_at") {
 			cols = append(cols, "created_at")
 			vals = append(vals, now)
 		}
-		if utils.HasColumn(config.DB, table, "updated_at") {
+		if intdb.HasColumn(intconfig.DB, table, "updated_at") {
 			cols = append(cols, "updated_at")
 			vals = append(vals, now)
 		}
@@ -96,7 +96,7 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 			}
 		}
 
-		_, err := config.DB.Exec(`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
+		_, err := intconfig.DB.Exec(`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(ph, ",")+`)`, vals...)
 		return err
 	}
 
@@ -113,7 +113,7 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 				return
 			}
 		}
-		if utils.HasColumn(config.DB, table, col) {
+		if intdb.HasColumn(intconfig.DB, table, col) {
 			if col == "booking_id" {
 				sets = append(sets, col+"=NULLIF(?,0)")
 			} else {
@@ -133,7 +133,7 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 	if info.BookingID > 0 {
 		addSet("booking_id", info.BookingID)
 	}
-	if utils.HasColumn(config.DB, table, "updated_at") {
+	if intdb.HasColumn(intconfig.DB, table, "updated_at") {
 		sets = append(sets, "updated_at=?")
 		args = append(args, now)
 	}
@@ -143,29 +143,29 @@ func (r TripInformationRepository) Upsert(info TripInformation) error {
 	}
 
 	args = append(args, existingID)
-	_, err := config.DB.Exec(`UPDATE `+table+` SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
+	_, err := intconfig.DB.Exec(`UPDATE `+table+` SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
 	return err
 }
 
 // UpsertTripInfo upserts by booking_id (+ trip_role if available), falling back to trip_number when necessary.
 func (r TripInformationRepository) UpsertTripInfo(info TripInformation) error {
 	table := "trip_information"
-	if !utils.HasTable(config.DB, table) {
+	if !intdb.HasTable(intconfig.DB, table) {
 		return nil
 	}
-	db := config.DB
+	db := intconfig.DB
 	tripRole := strings.TrimSpace(info.TripRole)
-	hasTripRole := utils.HasColumn(db, table, "trip_role")
+	hasTripRole := intdb.HasColumn(db, table, "trip_role")
 
 	var existingID int64
-	if info.BookingID > 0 && utils.HasColumn(db, table, "booking_id") {
+	if info.BookingID > 0 && intdb.HasColumn(db, table, "booking_id") {
 		if hasTripRole && tripRole != "" {
 			_ = db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? AND trip_role=? LIMIT 1`, info.BookingID, tripRole).Scan(&existingID)
 		} else {
 			_ = db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? LIMIT 1`, info.BookingID).Scan(&existingID)
 		}
 	}
-	if existingID == 0 && strings.TrimSpace(info.TripNumber) != "" && utils.HasColumn(db, table, "trip_number") {
+	if existingID == 0 && strings.TrimSpace(info.TripNumber) != "" && intdb.HasColumn(db, table, "trip_number") {
 		_ = db.QueryRow(`SELECT id FROM `+table+` WHERE trip_number=? LIMIT 1`, strings.TrimSpace(info.TripNumber)).Scan(&existingID)
 	}
 
@@ -174,21 +174,21 @@ func (r TripInformationRepository) UpsertTripInfo(info TripInformation) error {
 		cols := []string{"trip_number"}
 		vals := []any{strings.TrimSpace(info.TripNumber)}
 		add := func(col string, val any) {
-			switch v := val.(type) {
-			case string:
-				if strings.TrimSpace(v) == "" {
-					return
-				}
-			case int64:
-				if v == 0 {
-					return
-				}
+		switch v := val.(type) {
+		case string:
+			if strings.TrimSpace(v) == "" {
+				return
 			}
-			if utils.HasColumn(db, table, col) {
-				cols = append(cols, col)
-				vals = append(vals, val)
+		case int64:
+			if v == 0 {
+				return
 			}
 		}
+		if intdb.HasColumn(db, table, col) {
+			cols = append(cols, col)
+			vals = append(vals, val)
+		}
+	}
 		add("trip_details", info.TripDetails)
 		add("departure_date", info.DepartureDate)
 		add("departure_time", info.DepartureTime)
@@ -202,11 +202,11 @@ func (r TripInformationRepository) UpsertTripInfo(info TripInformation) error {
 		if hasTripRole && tripRole != "" {
 			add("trip_role", tripRole)
 		}
-		if utils.HasColumn(db, table, "created_at") {
+		if intdb.HasColumn(db, table, "created_at") {
 			cols = append(cols, "created_at")
 			vals = append(vals, now)
 		}
-		if utils.HasColumn(db, table, "updated_at") {
+		if intdb.HasColumn(db, table, "updated_at") {
 			cols = append(cols, "updated_at")
 			vals = append(vals, now)
 		}
@@ -236,7 +236,7 @@ func (r TripInformationRepository) UpsertTripInfo(info TripInformation) error {
 				return
 			}
 		}
-		if utils.HasColumn(db, table, col) {
+		if intdb.HasColumn(db, table, col) {
 			if col == "booking_id" {
 				sets = append(sets, col+"=NULLIF(?,0)")
 			} else {
@@ -259,7 +259,7 @@ func (r TripInformationRepository) UpsertTripInfo(info TripInformation) error {
 	if hasTripRole && tripRole != "" {
 		addSet("trip_role", tripRole)
 	}
-	if utils.HasColumn(db, table, "updated_at") {
+	if intdb.HasColumn(db, table, "updated_at") {
 		sets = append(sets, "updated_at=?")
 		args = append(args, now)
 	}

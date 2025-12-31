@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"strings"
 
-	legacy "backend/handlers"
 	intconfig "backend/internal/config"
 	intdb "backend/internal/db"
+	"backend/internal/domain/models"
 	"backend/internal/repositories"
 	"backend/internal/utils"
 )
@@ -32,18 +32,18 @@ func (s PassengerService) db() *sql.DB {
 }
 
 // SyncFromDeparture membuat/memperbarui penumpang per seat berdasarkan departure_settings + booking.
-func (s PassengerService) SyncFromDeparture(dep legacy.DepartureSetting) error {
+func (s PassengerService) SyncFromDeparture(dep models.DepartureSetting) error {
 	utils.LogEvent(s.RequestID, "passenger", "sync_departure", "booking_id="+strconv.FormatInt(dep.BookingID, 10))
 	return s.syncFromTrip(dep, "berangkat")
 }
 
 // SyncFromReturn membuat/memperbarui penumpang per seat berdasarkan return_settings + booking.
-func (s PassengerService) SyncFromReturn(ret legacy.DepartureSetting) error {
+func (s PassengerService) SyncFromReturn(ret models.DepartureSetting) error {
 	utils.LogEvent(s.RequestID, "passenger", "sync_return", "booking_id="+strconv.FormatInt(ret.BookingID, 10))
 	return s.syncFromTrip(ret, "pulang")
 }
 
-func (s PassengerService) syncFromTrip(dep legacy.DepartureSetting, tripRole string) error {
+func (s PassengerService) syncFromTrip(dep models.DepartureSetting, tripRole string) error {
 	if dep.BookingID <= 0 {
 		return fmt.Errorf("booking_id kosong pada setting id %d", dep.ID)
 	}

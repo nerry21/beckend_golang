@@ -3,7 +3,7 @@
 ## Menjalankan
 - Atur environment: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASS`, `DB_NAME`, `PORT` (default `8080`).
 - Pastikan MySQL aktif dengan kredensial yang sesuai.
-- Jalankan server: `go run ./cmd/api`.
+- Jalankan server: `go run .
 - Router utama ada di `internal/http/router.go`.
 
 ## Alur Utama

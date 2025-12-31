@@ -11,6 +11,8 @@ type Booking struct {
 	PassengerName  string
 	PassengerPhone string
 	PassengerCount int
+	PricePerSeat   int64
+	Total          int64
 	BookingFor     string
 	PaymentMethod  string
 	PaymentStatus  string

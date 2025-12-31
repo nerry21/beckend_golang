@@ -51,7 +51,7 @@ func (r BookingRepo) GetBookingByID(id int64) (models.Booking, error) {
 			id,
 			%s, %s, %s, %s,
 			%s, %s,
-			%s, %s,
+			%s, %s, %s, %s,
 			%s, %s,
 			%s
 		FROM %s
@@ -64,15 +64,18 @@ func (r BookingRepo) GetBookingByID(id int64) (models.Booking, error) {
 		sel("trip_time", "''"),       // 6
 		sel("passenger_name", "''"),  // 7
 		numSel("passenger_count"),    // 8
-		sel("booking_for", "''"),     // 9
-		sel("passenger_phone", "''"), // 10
-		sel("payment_method", "''"),  // 11
-		sel("payment_status", "''"),  // 12
+		numSel("price_per_seat"),     // 9
+		numSel("total"),              // 10
+		sel("booking_for", "''"),     // 11
+		sel("passenger_phone", "''"), // 12
+		sel("payment_method", "''"),  // 13
+		sel("payment_status", "''"),  // 14
 		table,
 	)
 
 	var b models.Booking
 	var passengerCount int
+	var pricePerSeat, total int64
 	if err := db.QueryRow(query, id).Scan(
 		&b.ID,
 		&b.Category,
@@ -82,6 +85,8 @@ func (r BookingRepo) GetBookingByID(id int64) (models.Booking, error) {
 		&b.TripTime,
 		&b.PassengerName,
 		&passengerCount,
+		&pricePerSeat,
+		&total,
 		&b.BookingFor,
 		&b.PassengerPhone,
 		&b.PaymentMethod,
@@ -93,6 +98,8 @@ func (r BookingRepo) GetBookingByID(id int64) (models.Booking, error) {
 		return models.Booking{}, err
 	}
 	b.PassengerCount = passengerCount
+	b.PricePerSeat = pricePerSeat
+	b.Total = total
 	return b, nil
 }
 

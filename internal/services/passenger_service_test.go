@@ -3,8 +3,8 @@ package services
 import (
 	"testing"
 
-	"backend/config"
-	legacy "backend/handlers"
+	intconfig "backend/internal/config"
+	"backend/internal/domain/models"
 	"backend/internal/repositories"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -16,7 +16,7 @@ func TestPassengerSyncFromDepartureIdempotent(t *testing.T) {
 		t.Fatalf("sqlmock init error: %v", err)
 	}
 	defer db.Close()
-	config.DB = db
+	intconfig.DB = db
 	mock.MatchExpectationsInOrder(false)
 
 	// booking_passengers table absence to skip passenger input lookup
@@ -40,7 +40,7 @@ func TestPassengerSyncFromDepartureIdempotent(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(1, 1))
 
 	svc := PassengerService{
-		PassengerRepo:   repositories.PassengerRepository{},
+		PassengerRepo:   repositories.PassengerRepository{DB: db},
 		BookingRepo:     repositories.BookingRepository{},
 		BookingSeatRepo: repositories.BookingSeatRepository{},
 		DB:              db,
@@ -90,8 +90,8 @@ func expectPassengerTableQueries(mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"column_name"}).AddRow("trip_role"))
 }
 
-func legacyDepartureFromBooking(b repositories.Booking, seat string) legacy.DepartureSetting {
-	return legacy.DepartureSetting{
+func legacyDepartureFromBooking(b repositories.Booking, seat string) models.DepartureSetting {
+	return models.DepartureSetting{
 		ID:             1,
 		BookingID:      b.ID,
 		BookingName:    b.BookingFor,

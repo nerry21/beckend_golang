@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"backend/config"
-	legacy "backend/handlers"
+	intconfig "backend/internal/config"
 	intdb "backend/internal/db"
+	"backend/internal/domain/models"
 )
 
 // ReturnRepository wraps DB access for return_settings with key-presence PATCH semantics.
@@ -22,20 +22,20 @@ func (r ReturnRepository) db() *sql.DB {
 	if r.DB != nil {
 		return r.DB
 	}
-	return config.DB
+	return intconfig.DB
 }
 
 // GetByID loads return_settings row.
-func (r ReturnRepository) GetByID(id int) (legacy.DepartureSetting, error) {
+func (r ReturnRepository) GetByID(id int) (models.ReturnSetting, error) {
 	if id <= 0 {
-		return legacy.DepartureSetting{}, sql.ErrNoRows
+		return models.ReturnSetting{}, sql.ErrNoRows
 	}
 	table := "return_settings"
 	db := r.db()
 	if db == nil || !intdb.HasTable(db, table) {
-		return legacy.DepartureSetting{}, sql.ErrNoRows
+		return models.ReturnSetting{}, sql.ErrNoRows
 	}
-	var d legacy.DepartureSetting
+	var d models.ReturnSetting
 	var count int
 	var depTime, routeFrom, routeTo, vehicleType sql.NullString
 	var createdAt sql.NullString
@@ -79,7 +79,7 @@ func (r ReturnRepository) GetByID(id int) (legacy.DepartureSetting, error) {
 		&createdAt,
 	)
 	if err != nil {
-		return legacy.DepartureSetting{}, err
+		return models.ReturnSetting{}, err
 	}
 	d.PassengerCount = strconv.Itoa(count)
 	d.DepartureTime = strings.TrimSpace(depTime.String)
@@ -91,21 +91,21 @@ func (r ReturnRepository) GetByID(id int) (legacy.DepartureSetting, error) {
 }
 
 // GetByBookingID loads by booking_id if exists.
-func (r ReturnRepository) GetByBookingID(bookingID int64) (legacy.DepartureSetting, error) {
+func (r ReturnRepository) GetByBookingID(bookingID int64) (models.ReturnSetting, error) {
 	if bookingID <= 0 {
-		return legacy.DepartureSetting{}, sql.ErrNoRows
+		return models.ReturnSetting{}, sql.ErrNoRows
 	}
 	table := "return_settings"
 	db := r.db()
 	if db == nil || !intdb.HasTable(db, table) || !intdb.HasColumn(db, table, "booking_id") {
-		return legacy.DepartureSetting{}, sql.ErrNoRows
+		return models.ReturnSetting{}, sql.ErrNoRows
 	}
 	var id int
 	if err := db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? ORDER BY id DESC LIMIT 1`, bookingID).Scan(&id); err != nil {
-		return legacy.DepartureSetting{}, err
+		return models.ReturnSetting{}, err
 	}
 
-	var d legacy.DepartureSetting
+	var d models.ReturnSetting
 	var count int
 	var createdAt sql.NullString
 	var depTime, routeFrom, routeTo, vehicleType sql.NullString
@@ -157,7 +157,7 @@ func (r ReturnRepository) GetByBookingID(bookingID int64) (legacy.DepartureSetti
 }
 
 // CreateFromBooking upserts return_settings keyed by booking_id.
-func (r ReturnRepository) CreateFromBooking(dep legacy.DepartureSetting) (legacy.DepartureSetting, error) {
+func (r ReturnRepository) CreateFromBooking(dep models.ReturnSetting) (models.ReturnSetting, error) {
 	table := "return_settings"
 	db := r.db()
 	if db == nil || !intdb.HasTable(db, table) {
@@ -248,21 +248,21 @@ func (r ReturnRepository) CreateFromBooking(dep legacy.DepartureSetting) (legacy
 }
 
 // UpdatePartial applies only fields present in raw JSON (key presence).
-func (r ReturnRepository) UpdatePartial(id int, rawJSON []byte) (legacy.DepartureSetting, error) {
+func (r ReturnRepository) UpdatePartial(id int, rawJSON []byte) (models.ReturnSetting, error) {
 	if id <= 0 {
-		return legacy.DepartureSetting{}, sql.ErrNoRows
+		return models.ReturnSetting{}, sql.ErrNoRows
 	}
 	table := "return_settings"
 	db := r.db()
 	if db == nil || !intdb.HasTable(db, table) {
-		return legacy.DepartureSetting{}, fmt.Errorf("tabel return_settings tidak ditemukan")
+		return models.ReturnSetting{}, fmt.Errorf("tabel return_settings tidak ditemukan")
 	}
 
 	existing, err := r.GetByBookingIDFromPayload(rawJSON)
 	if err != nil || existing.ID == 0 {
 		// fallback to load by id if booking_id not provided
 		if existing, err = r.GetByID(id); err != nil {
-			return legacy.DepartureSetting{}, err
+			return models.ReturnSetting{}, err
 		}
 	}
 
@@ -350,19 +350,19 @@ type returnFieldPresence struct {
 }
 
 // GetByBookingIDFromPayload tries to parse booking_id from raw JSON before loading.
-func (r ReturnRepository) GetByBookingIDFromPayload(rawJSON []byte) (legacy.DepartureSetting, error) {
-	var input legacy.DepartureSetting
+func (r ReturnRepository) GetByBookingIDFromPayload(rawJSON []byte) (models.ReturnSetting, error) {
+	var input models.ReturnSetting
 	if err := json.Unmarshal(rawJSON, &input); err != nil {
-		return legacy.DepartureSetting{}, err
+		return models.ReturnSetting{}, err
 	}
 	if input.BookingID > 0 {
 		return r.GetByBookingID(input.BookingID)
 	}
-	return legacy.DepartureSetting{}, sql.ErrNoRows
+	return models.ReturnSetting{}, sql.ErrNoRows
 }
 
 // buildReturnPatch merges payload into existing row while respecting key presence semantics.
-func buildReturnPatch(existing legacy.DepartureSetting, rawJSON []byte) (legacy.DepartureSetting, returnFieldPresence, int, error) {
+func buildReturnPatch(existing models.ReturnSetting, rawJSON []byte) (models.ReturnSetting, returnFieldPresence, int, error) {
 	payloadKeys := map[string]bool{}
 	var payloadMap map[string]any
 	if err := json.Unmarshal(rawJSON, &payloadMap); err == nil {
@@ -379,7 +379,7 @@ func buildReturnPatch(existing legacy.DepartureSetting, rawJSON []byte) (legacy.
 		return false
 	}
 
-	var input legacy.DepartureSetting
+	var input models.ReturnSetting
 	if err := json.Unmarshal(rawJSON, &input); err != nil {
 		return existing, returnFieldPresence{}, 0, err
 	}

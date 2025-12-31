@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"backend/config"
-	"backend/utils"
+	intconfig "backend/internal/config"
+	intdb "backend/internal/db"
 )
 
 // Booking represents minimal booking data we need for departure creation.
@@ -38,19 +38,19 @@ func (r BookingRepository) GetByID(id int64) (Booking, error) {
 		return Booking{}, fmt.Errorf("id tidak valid")
 	}
 	table := "bookings"
-	if !utils.HasTable(config.DB, table) {
+	if !intdb.HasTable(intconfig.DB, table) {
 		return Booking{}, fmt.Errorf("tabel bookings tidak ditemukan")
 	}
 
 	sel := func(col string, def string) string {
-		if utils.HasColumn(config.DB, table, col) {
+		if intdb.HasColumn(intconfig.DB, table, col) {
 			return "COALESCE(" + col + ", '')"
 		}
 		return def
 	}
 
 	numSel := func(col string) string {
-		if utils.HasColumn(config.DB, table, col) {
+		if intdb.HasColumn(intconfig.DB, table, col) {
 			return "COALESCE(" + col + ", 0)"
 		}
 		return "0"
@@ -87,7 +87,7 @@ func (r BookingRepository) GetByID(id int64) (Booking, error) {
 	var b Booking
 	var count int
 	var price, total int64
-	if err := config.DB.QueryRow(query, id).Scan(
+	if err := intconfig.DB.QueryRow(query, id).Scan(
 		&b.ID,
 		&b.Category,
 		&b.RouteFrom,
@@ -110,11 +110,11 @@ func (r BookingRepository) GetByID(id int64) (Booking, error) {
 	b.PricePerSeat = price
 	b.Total = total
 
-	if utils.HasColumn(config.DB, table, "payment_method") {
-		_ = config.DB.QueryRow(`SELECT COALESCE(payment_method,'') FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(&b.PaymentMethod)
+	if intdb.HasColumn(intconfig.DB, table, "payment_method") {
+		_ = intconfig.DB.QueryRow(`SELECT COALESCE(payment_method,'') FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(&b.PaymentMethod)
 	}
-	if utils.HasColumn(config.DB, table, "payment_status") {
-		_ = config.DB.QueryRow(`SELECT COALESCE(payment_status,'') FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(&b.PaymentStatus)
+	if intdb.HasColumn(intconfig.DB, table, "payment_status") {
+		_ = intconfig.DB.QueryRow(`SELECT COALESCE(payment_status,'') FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(&b.PaymentStatus)
 	}
 
 	return b, nil
@@ -126,20 +126,20 @@ func (r BookingRepository) UpdatePaymentStatus(id int64, status, method string) 
 		return fmt.Errorf("id tidak valid")
 	}
 	table := "bookings"
-	if !utils.HasTable(config.DB, table) || !utils.HasColumn(config.DB, table, "payment_status") {
+	if !intdb.HasTable(intconfig.DB, table) || !intdb.HasColumn(intconfig.DB, table, "payment_status") {
 		return nil
 	}
 
 	sets := []string{"payment_status=?"}
 	args := []any{strings.TrimSpace(status)}
-	if method != "" && utils.HasColumn(config.DB, table, "payment_method") {
+	if method != "" && intdb.HasColumn(intconfig.DB, table, "payment_method") {
 		sets = append(sets, "payment_method=?")
 		args = append(args, method)
 	}
-	if utils.HasColumn(config.DB, table, "updated_at") {
+	if intdb.HasColumn(intconfig.DB, table, "updated_at") {
 		sets = append(sets, "updated_at=NOW()")
 	}
 	args = append(args, id)
-	_, err := config.DB.Exec(`UPDATE `+table+` SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
+	_, err := intconfig.DB.Exec(`UPDATE `+table+` SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
 	return err
 }

@@ -3,11 +3,11 @@ package repositories
 import (
 	"testing"
 
-	legacy "backend/handlers"
+	"backend/internal/domain/models"
 )
 
 func TestBuildDeparturePatch_BookingIDNotTouchedWhenMissing(t *testing.T) {
-	existing := legacy.DepartureSetting{ID: 1, BookingID: 55, PassengerCount: "2"}
+	existing := models.DepartureSetting{ID: 1, BookingID: 55, PassengerCount: "2"}
 	raw := []byte(`{"departure_status":"Berangkat"}`)
 
 	merged, presence, count, err := buildDeparturePatch(existing, raw)
@@ -26,7 +26,7 @@ func TestBuildDeparturePatch_BookingIDNotTouchedWhenMissing(t *testing.T) {
 }
 
 func TestBuildDeparturePatch_BookingIDUpdatedWhenPresent(t *testing.T) {
-	existing := legacy.DepartureSetting{ID: 1, BookingID: 55, PassengerCount: "3"}
+	existing := models.DepartureSetting{ID: 1, BookingID: 55, PassengerCount: "3"}
 	raw := []byte(`{"booking_id":123,"departure_status":"Berangkat"}`)
 
 	merged, presence, _, err := buildDeparturePatch(existing, raw)
@@ -42,7 +42,7 @@ func TestBuildDeparturePatch_BookingIDUpdatedWhenPresent(t *testing.T) {
 }
 
 func TestBuildDeparturePatch_BookingIDZeroIgnored(t *testing.T) {
-	existing := legacy.DepartureSetting{ID: 1, BookingID: 77, PassengerCount: "1"}
+	existing := models.DepartureSetting{ID: 1, BookingID: 77, PassengerCount: "1"}
 	raw := []byte(`{"booking_id":0,"departure_status":"Berangkat"}`)
 
 	merged, presence, _, err := buildDeparturePatch(existing, raw)

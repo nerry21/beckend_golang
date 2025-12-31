@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"strings"
 
-	"backend/config"
-	"backend/utils"
+	intconfig "backend/internal/config"
+	intdb "backend/internal/db"
 )
 
 type PassengerSeatData struct {
@@ -50,29 +50,29 @@ func (r PassengerRepository) db() *sql.DB {
 	if r.DB != nil {
 		return r.DB
 	}
-	return config.DB
+	return intconfig.DB
 }
 
 // GetByID fetches one passenger row adaptively.
 func (r PassengerRepository) GetByID(id int64) (PassengerDetail, error) {
 	table := "passengers"
 	db := r.db()
-	if !utils.HasTable(db, table) || id <= 0 {
+	if !intdb.HasTable(db, table) || id <= 0 {
 		return PassengerDetail{}, sql.ErrNoRows
 	}
-	if !utils.HasColumn(db, table, "id") || !utils.HasColumn(db, table, "booking_id") {
+	if !intdb.HasColumn(db, table, "id") || !intdb.HasColumn(db, table, "booking_id") {
 		return PassengerDetail{}, sql.ErrNoRows
 	}
 
-	hasTripRole := utils.HasColumn(db, table, "trip_role")
-	hasDate := utils.HasColumn(db, table, "date")
-	hasDepartureTime := utils.HasColumn(db, table, "departure_time")
-	hasPickup := utils.HasColumn(db, table, "pickup_address")
-	hasDropoff := utils.HasColumn(db, table, "dropoff_address")
-	hasServiceType := utils.HasColumn(db, table, "service_type")
-	hasDriver := utils.HasColumn(db, table, "driver_name")
-	hasVehicle := utils.HasColumn(db, table, "vehicle_code")
-	hasTotal := utils.HasColumn(db, table, "total_amount")
+	hasTripRole := intdb.HasColumn(db, table, "trip_role")
+	hasDate := intdb.HasColumn(db, table, "date")
+	hasDepartureTime := intdb.HasColumn(db, table, "departure_time")
+	hasPickup := intdb.HasColumn(db, table, "pickup_address")
+	hasDropoff := intdb.HasColumn(db, table, "dropoff_address")
+	hasServiceType := intdb.HasColumn(db, table, "service_type")
+	hasDriver := intdb.HasColumn(db, table, "driver_name")
+	hasVehicle := intdb.HasColumn(db, table, "vehicle_code")
+	hasTotal := intdb.HasColumn(db, table, "total_amount")
 
 	tripRoleSel := "''"
 	if hasTripRole {
@@ -152,22 +152,23 @@ func (r PassengerRepository) GetByID(id int64) (PassengerDetail, error) {
 // UpsertPassenger melakukan insert/update berdasarkan booking_id + selected_seats (+ trip_role jika ada kolom).
 func (r PassengerRepository) UpsertPassenger(bookingID int64, data PassengerSeatData) error {
 	table := "passengers"
-	if !utils.HasTable(config.DB, table) {
+	db := r.db()
+	if !intdb.HasTable(db, table) {
 		return nil
 	}
-	if bookingID <= 0 || !utils.HasColumn(config.DB, table, "booking_id") || !utils.HasColumn(config.DB, table, "selected_seats") {
+	if bookingID <= 0 || !intdb.HasColumn(db, table, "booking_id") || !intdb.HasColumn(db, table, "selected_seats") {
 		return nil
 	}
 
 	tripRole := strings.TrimSpace(data.TripRole)
-	hasTripRole := utils.HasColumn(config.DB, table, "trip_role")
+	hasTripRole := intdb.HasColumn(db, table, "trip_role")
 
 	// cek existing
 	var existingID sql.NullInt64
 	if hasTripRole {
-		_ = config.DB.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? AND selected_seats=? AND trip_role=? LIMIT 1`, bookingID, strings.TrimSpace(data.SelectedSeat), tripRole).Scan(&existingID)
+		_ = db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? AND selected_seats=? AND trip_role=? LIMIT 1`, bookingID, strings.TrimSpace(data.SelectedSeat), tripRole).Scan(&existingID)
 	} else {
-		_ = config.DB.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? AND selected_seats=? LIMIT 1`, bookingID, strings.TrimSpace(data.SelectedSeat)).Scan(&existingID)
+		_ = db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? AND selected_seats=? LIMIT 1`, bookingID, strings.TrimSpace(data.SelectedSeat)).Scan(&existingID)
 	}
 
 	if !existingID.Valid || existingID.Int64 == 0 {
@@ -198,7 +199,7 @@ func (r PassengerRepository) UpsertPassenger(bookingID int64, data PassengerSeat
 			placeholders[i] = "?"
 		}
 
-		_, err := config.DB.Exec(`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(placeholders, ",")+`)`, vals...)
+		_, err := db.Exec(`INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) VALUES (`+strings.Join(placeholders, ",")+`)`, vals...)
 		return err
 	}
 
@@ -224,7 +225,7 @@ func (r PassengerRepository) UpsertPassenger(bookingID int64, data PassengerSeat
 		whereArgs = append(whereArgs, tripRole)
 		args = append(args, tripRole)
 	}
-	_, err := config.DB.Exec(`
+	_, err := db.Exec(`
 		UPDATE `+table+`
 		SET passenger_name=?,
 		    passenger_phone=?,
@@ -271,10 +272,11 @@ type PassengerRecord struct {
 // ListPassengers returns passengers filtered by booking_id/trip_role when available.
 func (r PassengerRepository) ListPassengers(f PassengerFilter) ([]PassengerRecord, error) {
 	table := "passengers"
-	if !utils.HasTable(config.DB, table) {
+	db := r.db()
+	if !intdb.HasTable(db, table) {
 		return []PassengerRecord{}, nil
 	}
-	if !utils.HasColumn(config.DB, table, "booking_id") || !utils.HasColumn(config.DB, table, "selected_seats") {
+	if !intdb.HasColumn(db, table, "booking_id") || !intdb.HasColumn(db, table, "selected_seats") {
 		return []PassengerRecord{}, nil
 	}
 
@@ -284,7 +286,7 @@ func (r PassengerRepository) ListPassengers(f PassengerFilter) ([]PassengerRecor
 		where = append(where, "booking_id=?")
 		args = append(args, f.BookingID)
 	}
-	hasTripRole := utils.HasColumn(config.DB, table, "trip_role")
+	hasTripRole := intdb.HasColumn(db, table, "trip_role")
 	if hasTripRole && strings.TrimSpace(f.TripRole) != "" {
 		where = append(where, "trip_role=?")
 		args = append(args, strings.TrimSpace(f.TripRole))
@@ -295,7 +297,7 @@ func (r PassengerRepository) ListPassengers(f PassengerFilter) ([]PassengerRecor
 		tripRoleSel = "COALESCE(trip_role,'')"
 	}
 
-	rows, err := config.DB.Query(`SELECT id, booking_id, COALESCE(selected_seats,''), `+tripRoleSel+`, COALESCE(passenger_name,''), COALESCE(passenger_phone,'') FROM `+table+` WHERE `+strings.Join(where, " AND ")+` ORDER BY id ASC`, args...)
+	rows, err := db.Query(`SELECT id, booking_id, COALESCE(selected_seats,''), `+tripRoleSel+`, COALESCE(passenger_name,''), COALESCE(passenger_phone,'') FROM `+table+` WHERE `+strings.Join(where, " AND ")+` ORDER BY id ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

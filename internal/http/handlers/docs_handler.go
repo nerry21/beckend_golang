@@ -18,17 +18,17 @@ import (
 func GetPassengerETicketPDF(c *gin.Context) {
 	pid, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || pid <= 0 {
-		RespondError(c, http.StatusBadRequest, "id passenger tidak valid", err)
+		respondError(c, http.StatusBadRequest, "invalid_passenger_id", "id passenger tidak valid", err)
 		return
 	}
 
 	paid, payErr := isPaymentLunas(pid)
 	if payErr != nil {
-		RespondError(c, http.StatusInternalServerError, "payment_check_failed", payErr.Error(), payErr)
+		respondError(c, http.StatusInternalServerError, "payment_check_failed", payErr.Error(), payErr)
 		return
 	}
 	if !paid {
-		RespondError(c, http.StatusForbidden, "payment_pending", "pembayaran belum lunas", nil)
+		respondError(c, http.StatusForbidden, "payment_pending", "pembayaran belum lunas", nil)
 		return
 	}
 
@@ -40,7 +40,7 @@ func GetPassengerETicketPDF(c *gin.Context) {
 	}
 	pdfBytes, filename, err := svc.GenerateETicket(pid)
 	if err != nil {
-		RespondError(c, http.StatusNotFound, "data passenger tidak ditemukan", err)
+		respondError(c, http.StatusNotFound, "passenger_not_found", "data passenger tidak ditemukan", err)
 		return
 	}
 
@@ -53,17 +53,17 @@ func GetPassengerETicketPDF(c *gin.Context) {
 func GetPassengerInvoicePDF(c *gin.Context) {
 	pid, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || pid <= 0 {
-		RespondError(c, http.StatusBadRequest, "id passenger tidak valid", err)
+		respondError(c, http.StatusBadRequest, "invalid_passenger_id", "id passenger tidak valid", err)
 		return
 	}
 
 	paid, payErr := isPaymentLunas(pid)
 	if payErr != nil {
-		RespondError(c, http.StatusInternalServerError, "payment_check_failed", payErr.Error(), payErr)
+		respondError(c, http.StatusInternalServerError, "payment_check_failed", payErr.Error(), payErr)
 		return
 	}
 	if !paid {
-		RespondError(c, http.StatusForbidden, "payment_pending", "pembayaran belum lunas", nil)
+		respondError(c, http.StatusForbidden, "payment_pending", "pembayaran belum lunas", nil)
 		return
 	}
 
@@ -74,7 +74,7 @@ func GetPassengerInvoicePDF(c *gin.Context) {
 	}
 	pdfBytes, filename, err := svc.GenerateInvoice(pid)
 	if err != nil {
-		RespondError(c, http.StatusNotFound, "data passenger tidak ditemukan", err)
+		respondError(c, http.StatusNotFound, "passenger_not_found", "data passenger tidak ditemukan", err)
 		return
 	}
 

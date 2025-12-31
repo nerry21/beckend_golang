@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	legacy "backend/handlers"
+	"backend/internal/domain/models"
 	"backend/internal/repositories"
 	"backend/internal/utils"
 )
@@ -21,7 +21,7 @@ type DepartureService struct {
 }
 
 // CreateOrUpdateFromBooking ensures departure_settings exists from booking data.
-func (s DepartureService) CreateOrUpdateFromBooking(booking repositories.Booking, seats []repositories.BookingSeat) (legacy.DepartureSetting, error) {
+func (s DepartureService) CreateOrUpdateFromBooking(booking repositories.Booking, seats []repositories.BookingSeat) (models.DepartureSetting, error) {
 	seatCodes := []string{}
 	for _, bs := range seats {
 		if strings.TrimSpace(bs.SeatCode) != "" {
@@ -30,7 +30,7 @@ func (s DepartureService) CreateOrUpdateFromBooking(booking repositories.Booking
 	}
 	seatJoined := strings.Join(seatCodes, ",")
 
-	dep := legacy.DepartureSetting{
+	dep := models.DepartureSetting{
 		BookingName:     firstNonEmpty(booking.BookingFor, booking.PassengerName),
 		Phone:           booking.PassengerPhone,
 		PickupAddress:   booking.PickupLocation,
@@ -49,19 +49,19 @@ func (s DepartureService) CreateOrUpdateFromBooking(booking repositories.Booking
 }
 
 // CreateOrUpdateFromBookingID fetches booking data before upsert.
-func (s DepartureService) CreateOrUpdateFromBookingID(bookingID int64) (legacy.DepartureSetting, error) {
+func (s DepartureService) CreateOrUpdateFromBookingID(bookingID int64) (models.DepartureSetting, error) {
 	booking, err := s.BookingRepo.GetByID(bookingID)
 	if err != nil {
-		return legacy.DepartureSetting{}, err
+		return models.DepartureSetting{}, err
 	}
 	seats, _ := s.SeatRepo.GetSeats(bookingID)
 	return s.CreateOrUpdateFromBooking(booking, seats)
 }
 
 // MarkBerangkat updates departure_settings with key-presence semantics and triggers sync when status Berangkat.
-func (s DepartureService) MarkBerangkat(id int, rawPayload []byte) (legacy.DepartureSetting, error) {
+func (s DepartureService) MarkBerangkat(id int, rawPayload []byte) (models.DepartureSetting, error) {
 	if len(bytes.TrimSpace(rawPayload)) == 0 {
-		return legacy.DepartureSetting{}, errors.New("payload kosong")
+		return models.DepartureSetting{}, errors.New("payload kosong")
 	}
 	utils.LogEvent(s.RequestID, "departure", "mark_berangkat", "start id="+strconv.Itoa(id))
 
@@ -87,11 +87,7 @@ func (s DepartureService) MarkBerangkat(id int, rawPayload []byte) (legacy.Depar
 	return reloaded, nil
 }
 
-func (s DepartureService) syncAfterBerangkat(dep legacy.DepartureSetting) error {
-	if err := legacy.SyncAfterDepartureBerangkat(dep); err != nil {
-		return err
-	}
-
+func (s DepartureService) syncAfterBerangkat(dep models.DepartureSetting) error {
 	ref := dep
 	if ref.BookingID <= 0 {
 		if reloaded, err := s.Repo.GetByID(dep.ID); err == nil {

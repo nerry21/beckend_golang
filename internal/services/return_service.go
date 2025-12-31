@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	legacy "backend/handlers"
+	"backend/internal/domain/models"
 	"backend/internal/repositories"
 	"backend/internal/utils"
 )
@@ -18,7 +18,7 @@ type ReturnService struct {
 }
 
 // CreateOrUpdateFromBooking ensures return_settings exists keyed by booking_id.
-func (s ReturnService) CreateOrUpdateFromBooking(booking repositories.Booking, seats []repositories.BookingSeat) (legacy.DepartureSetting, error) {
+func (s ReturnService) CreateOrUpdateFromBooking(booking repositories.Booking, seats []repositories.BookingSeat) (models.ReturnSetting, error) {
 	seatCodes := []string{}
 	for _, bs := range seats {
 		if strings.TrimSpace(bs.SeatCode) != "" {
@@ -27,7 +27,7 @@ func (s ReturnService) CreateOrUpdateFromBooking(booking repositories.Booking, s
 	}
 	seatJoined := strings.Join(seatCodes, ",")
 
-	ret := legacy.DepartureSetting{
+	ret := models.ReturnSetting{
 		BookingName:     firstNonEmpty(booking.BookingFor, booking.PassengerName),
 		Phone:           booking.PassengerPhone,
 		PickupAddress:   booking.PickupLocation,
@@ -46,17 +46,17 @@ func (s ReturnService) CreateOrUpdateFromBooking(booking repositories.Booking, s
 }
 
 // CreateOrUpdateFromBookingID fetches booking and seats before upsert.
-func (s ReturnService) CreateOrUpdateFromBookingID(bookingID int64) (legacy.DepartureSetting, error) {
+func (s ReturnService) CreateOrUpdateFromBookingID(bookingID int64) (models.ReturnSetting, error) {
 	booking, err := s.BookingRepo.GetByID(bookingID)
 	if err != nil {
-		return legacy.DepartureSetting{}, err
+		return models.ReturnSetting{}, err
 	}
 	seats, _ := s.SeatRepo.GetSeats(bookingID)
 	return s.CreateOrUpdateFromBooking(booking, seats)
 }
 
 // MarkPulang updates return_settings with key-presence semantics.
-func (s ReturnService) MarkPulang(id int, rawPayload []byte) (legacy.DepartureSetting, error) {
+func (s ReturnService) MarkPulang(id int, rawPayload []byte) (models.ReturnSetting, error) {
 	if s.Repo.DB == nil {
 		s.Repo.DB = s.BookingRepo.DB
 	}

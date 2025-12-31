@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	legacy "backend/handlers"
+	"backend/internal/domain/models"
 	"backend/internal/repositories"
 	"backend/internal/utils"
 )
@@ -15,15 +15,15 @@ type TripInfoService struct {
 	RequestID string
 }
 
-func (s TripInfoService) UpsertFromDeparture(dep legacy.DepartureSetting) error {
+func (s TripInfoService) UpsertFromDeparture(dep models.DepartureSetting) error {
 	return s.upsertFromSetting(dep, "berangkat")
 }
 
-func (s TripInfoService) UpsertFromReturn(ret legacy.DepartureSetting) error {
+func (s TripInfoService) UpsertFromReturn(ret models.DepartureSetting) error {
 	return s.upsertFromSetting(ret, "pulang")
 }
 
-func (s TripInfoService) upsertFromSetting(dep legacy.DepartureSetting, tripRole string) error {
+func (s TripInfoService) upsertFromSetting(dep models.DepartureSetting, tripRole string) error {
 	tripNumber := strings.TrimSpace(dep.TripNumber)
 	if tripNumber == "" && dep.BookingID > 0 {
 		tripNumber = fmt.Sprintf("TRIP-%s-%d", strings.ToUpper(tripRole), dep.BookingID)

@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"strings"
 
-	"backend/config"
-	"backend/utils"
+	intconfig "backend/internal/config"
+	intdb "backend/internal/db"
 )
 
 type BookingSeat struct {
@@ -25,37 +25,37 @@ func (r BookingSeatRepository) GetSeats(bookingID int64) ([]BookingSeat, error) 
 		return nil, nil
 	}
 	table := "booking_seats"
-	if !utils.HasTable(config.DB, table) {
+	if !intdb.HasTable(intconfig.DB, table) {
 		return nil, nil
 	}
-	if !utils.HasColumn(config.DB, table, "booking_id") || !utils.HasColumn(config.DB, table, "seat_code") {
+	if !intdb.HasColumn(intconfig.DB, table, "booking_id") || !intdb.HasColumn(intconfig.DB, table, "seat_code") {
 		return nil, nil
 	}
 
 	cols := []string{"seat_code"}
-	if utils.HasColumn(config.DB, table, "route_from") {
+	if intdb.HasColumn(intconfig.DB, table, "route_from") {
 		cols = append(cols, "route_from")
 	} else {
 		cols = append(cols, "''")
 	}
-	if utils.HasColumn(config.DB, table, "route_to") {
+	if intdb.HasColumn(intconfig.DB, table, "route_to") {
 		cols = append(cols, "route_to")
 	} else {
 		cols = append(cols, "''")
 	}
-	if utils.HasColumn(config.DB, table, "trip_date") {
+	if intdb.HasColumn(intconfig.DB, table, "trip_date") {
 		cols = append(cols, "trip_date")
 	} else {
 		cols = append(cols, "''")
 	}
-	if utils.HasColumn(config.DB, table, "trip_time") {
+	if intdb.HasColumn(intconfig.DB, table, "trip_time") {
 		cols = append(cols, "trip_time")
 	} else {
 		cols = append(cols, "''")
 	}
 
 	query := `SELECT ` + strings.Join(cols, ",") + ` FROM ` + table + ` WHERE booking_id=? ORDER BY id ASC`
-	rows, err := config.DB.Query(query, bookingID)
+	rows, err := intconfig.DB.Query(query, bookingID)
 	if err != nil {
 		return nil, err
 	}
