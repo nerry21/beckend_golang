@@ -131,9 +131,6 @@ func (s DocsService) loadPassengerDocData(passengerID int64) (passengerDocData, 
 		if strings.TrimSpace(out.PassengerName) == "" {
 			out.PassengerName = booking.PassengerName
 		}
-		if strings.TrimSpace(out.PassengerPhone) == "" {
-			out.PassengerPhone = booking.PassengerPhone
-		}
 		if strings.TrimSpace(out.ServiceType) == "" {
 			out.ServiceType = booking.Category
 		}

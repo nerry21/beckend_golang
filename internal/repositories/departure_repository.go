@@ -229,6 +229,13 @@ func (r DepartureRepository) UpdatePartial(id int, rawJSON []byte) (models.Depar
 		return merged, fmt.Errorf("tabel departure_settings tidak ditemukan")
 	}
 
+	if strings.TrimSpace(merged.VehicleType) == "" {
+		if vt := lookupVehicleTypeByDriver(db, merged.DriverName); vt != "" {
+			merged.VehicleType = vt
+			presence.VehicleType = true
+		}
+	}
+
 	sets := []string{}
 	args := []any{}
 
@@ -314,13 +321,16 @@ type departureFieldPresence struct {
 
 // buildDeparturePatch merges payload into existing row respecting key presence.
 func buildDeparturePatch(existing models.DepartureSetting, rawJSON []byte) (models.DepartureSetting, departureFieldPresence, int, error) {
-	payloadKeys := map[string]bool{}
-	var payloadMap map[string]any
-	if err := json.Unmarshal(rawJSON, &payloadMap); err == nil {
-		for k := range payloadMap {
-			payloadKeys[strings.ToLower(k)] = true
-		}
+	payloadMap := map[string]any{}
+	if err := json.Unmarshal(rawJSON, &payloadMap); err != nil {
+		return existing, departureFieldPresence{}, 0, err
 	}
+
+	payloadKeys := map[string]bool{}
+	for k := range payloadMap {
+		payloadKeys[strings.ToLower(k)] = true
+	}
+
 	hasField := func(names ...string) bool {
 		for _, n := range names {
 			if payloadKeys[strings.ToLower(n)] {
@@ -330,9 +340,46 @@ func buildDeparturePatch(existing models.DepartureSetting, rawJSON []byte) (mode
 		return false
 	}
 
-	var input models.DepartureSetting
-	if err := json.Unmarshal(rawJSON, &input); err != nil {
-		return existing, departureFieldPresence{}, 0, err
+	getVal := func(names ...string) (any, bool) {
+		for key, val := range payloadMap {
+			for _, name := range names {
+				if strings.EqualFold(key, name) {
+					return val, true
+				}
+			}
+		}
+		return nil, false
+	}
+
+	getString := func(names ...string) string {
+		if val, ok := getVal(names...); ok {
+			return strings.TrimSpace(fmt.Sprint(val))
+		}
+		return ""
+	}
+
+	getInt64 := func(names ...string) int64 {
+		if val, ok := getVal(names...); ok {
+			switch v := val.(type) {
+			case float64:
+				return int64(v)
+			case float32:
+				return int64(v)
+			case int:
+				return int64(v)
+			case int64:
+				return v
+			case json.Number:
+				if n, err := v.Int64(); err == nil {
+					return n
+				}
+			case string:
+				if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+					return n
+				}
+			}
+		}
+		return 0
 	}
 
 	presence := departureFieldPresence{
@@ -356,81 +403,104 @@ func buildDeparturePatch(existing models.DepartureSetting, rawJSON []byte) (mode
 		BookingID:          hasField("bookingid", "booking_id"),
 	}
 
-	if presence.BookingID && input.BookingID == 0 {
-		if v, ok := payloadMap["booking_id"]; ok {
-			switch val := v.(type) {
-			case float64:
-				input.BookingID = int64(val)
-			case int64:
-				input.BookingID = val
-			case int:
-				input.BookingID = int64(val)
-			case string:
-				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
-					input.BookingID = n
-				}
-			}
+	merged := existing
+
+	if presence.BookingName {
+		if v := getString("bookingName", "booking_name"); v != "" {
+			merged.BookingName = v
+		}
+	}
+	if presence.Phone {
+		if v := getString("phone"); v != "" {
+			merged.Phone = v
+		}
+	}
+	if presence.PickupAddress {
+		if v := getString("pickupAddress", "pickup_address"); v != "" {
+			merged.PickupAddress = v
+		}
+	}
+	if presence.DepartureDate {
+		if v := getString("departureDate", "departure_date"); v != "" {
+			merged.DepartureDate = v
+		}
+	}
+	if presence.SeatNumbers {
+		if v := getString("seatNumbers", "seat_numbers"); v != "" {
+			merged.SeatNumbers = v
+		}
+	}
+	if presence.PassengerCount {
+		if v := getString("passengerCount", "passenger_count"); v != "" {
+			merged.PassengerCount = v
+		}
+	}
+	if presence.ServiceType {
+		if v := getString("serviceType", "service_type"); v != "" {
+			merged.ServiceType = v
+		}
+	}
+	if presence.DriverName {
+		if v := getString("driverName", "driver_name"); v != "" {
+			merged.DriverName = v
+		}
+	}
+	if presence.VehicleCode {
+		if v := getString("vehicleCode", "vehicle_code"); v != "" {
+			merged.VehicleCode = v
+		}
+	}
+	if presence.VehicleType {
+		if v := getString("vehicleType", "vehicle_type"); v != "" {
+			merged.VehicleType = v
+		}
+	}
+	if presence.SuratJalanFile {
+		if v := getString("suratJalanFile", "surat_jalan_file"); v != "" {
+			merged.SuratJalanFile = v
+		}
+	}
+	if presence.SuratJalanFileName {
+		if v := getString("suratJalanFileName", "surat_jalan_file_name"); v != "" {
+			merged.SuratJalanFileName = v
+		}
+	}
+	if presence.DepartureStatus {
+		if v := getString("departureStatus", "departure_status"); v != "" {
+			merged.DepartureStatus = v
 		}
 	}
 
-	merged := existing
-
-	if presence.BookingName && strings.TrimSpace(input.BookingName) != "" {
-		merged.BookingName = input.BookingName
+	if presence.DepartureTime {
+		if v := getString("departureTime", "departure_time"); v != "" {
+			merged.DepartureTime = v
+		}
 	}
-	if presence.Phone && strings.TrimSpace(input.Phone) != "" {
-		merged.Phone = input.Phone
+	if presence.RouteFrom {
+		if v := getString("routeFrom", "route_from"); v != "" {
+			merged.RouteFrom = v
+		}
 	}
-	if presence.PickupAddress && strings.TrimSpace(input.PickupAddress) != "" {
-		merged.PickupAddress = input.PickupAddress
+	if presence.RouteTo {
+		if v := getString("routeTo", "route_to"); v != "" {
+			merged.RouteTo = v
+		}
 	}
-	if presence.DepartureDate && strings.TrimSpace(input.DepartureDate) != "" {
-		merged.DepartureDate = input.DepartureDate
-	}
-	if presence.SeatNumbers && strings.TrimSpace(input.SeatNumbers) != "" {
-		merged.SeatNumbers = input.SeatNumbers
-	}
-	if presence.PassengerCount && strings.TrimSpace(input.PassengerCount) != "" {
-		merged.PassengerCount = input.PassengerCount
-	}
-	if presence.ServiceType && strings.TrimSpace(input.ServiceType) != "" {
-		merged.ServiceType = input.ServiceType
-	}
-	if presence.DriverName && strings.TrimSpace(input.DriverName) != "" {
-		merged.DriverName = input.DriverName
-	}
-	if presence.VehicleCode && strings.TrimSpace(input.VehicleCode) != "" {
-		merged.VehicleCode = input.VehicleCode
-	}
-	if presence.VehicleType && strings.TrimSpace(input.VehicleType) != "" {
-		merged.VehicleType = input.VehicleType
-	}
-	if presence.SuratJalanFile && strings.TrimSpace(input.SuratJalanFile) != "" {
-		merged.SuratJalanFile = input.SuratJalanFile
-	}
-	if presence.SuratJalanFileName && strings.TrimSpace(input.SuratJalanFileName) != "" {
-		merged.SuratJalanFileName = input.SuratJalanFileName
-	}
-	if presence.DepartureStatus && strings.TrimSpace(input.DepartureStatus) != "" {
-		merged.DepartureStatus = input.DepartureStatus
+	if presence.TripNumber {
+		if v := getString("tripNumber", "trip_number"); v != "" {
+			merged.TripNumber = v
+		}
 	}
 
-	if presence.DepartureTime && strings.TrimSpace(input.DepartureTime) != "" {
-		merged.DepartureTime = input.DepartureTime
-	}
-	if presence.RouteFrom && strings.TrimSpace(input.RouteFrom) != "" {
-		merged.RouteFrom = input.RouteFrom
-	}
-	if presence.RouteTo && strings.TrimSpace(input.RouteTo) != "" {
-		merged.RouteTo = input.RouteTo
-	}
-	if presence.TripNumber && strings.TrimSpace(input.TripNumber) != "" {
-		merged.TripNumber = input.TripNumber
+	if presence.BookingID {
+		if bid := getInt64("bookingId", "booking_id"); bid > 0 {
+			merged.BookingID = bid
+		} else {
+			presence.BookingID = false
+		}
 	}
 
-	if presence.BookingID && input.BookingID > 0 {
-		merged.BookingID = input.BookingID
-	} else if presence.BookingID && input.BookingID <= 0 {
+	if presence.BookingID && merged.BookingID <= 0 {
 		presence.BookingID = false
 	}
 
@@ -438,6 +508,46 @@ func buildDeparturePatch(existing models.DepartureSetting, rawJSON []byte) (mode
 	merged.PassengerCount = strconv.Itoa(count)
 
 	return merged, presence, count, nil
+}
+
+func lookupVehicleTypeByDriver(db *sql.DB, driverName string) string {
+	if db == nil {
+		return ""
+	}
+	name := strings.TrimSpace(driverName)
+	if name == "" {
+		return ""
+	}
+	lowerName := strings.ToLower(name)
+
+	sources := []struct {
+		table   string
+		nameCol string
+		typeCol string
+	}{
+		{table: "drivers", nameCol: "name", typeCol: "vehicle_type"},
+		{table: "driver_accounts", nameCol: "driver_name", typeCol: "vehicle_type"},
+	}
+
+	for _, src := range sources {
+		if !intdb.HasTable(db, src.table) ||
+			!intdb.HasColumn(db, src.table, src.nameCol) ||
+			!intdb.HasColumn(db, src.table, src.typeCol) {
+			continue
+		}
+
+		var vt sql.NullString
+		err := db.QueryRow(
+			`SELECT COALESCE(`+src.typeCol+`,'') FROM `+src.table+` WHERE LOWER(`+src.nameCol+`)=? OR `+src.nameCol+`=? ORDER BY id DESC LIMIT 1`,
+			lowerName,
+			name,
+		).Scan(&vt)
+		if err == nil && strings.TrimSpace(vt.String) != "" {
+			return strings.TrimSpace(vt.String)
+		}
+	}
+
+	return ""
 }
 
 func nullIfEmptyString(s string) any {

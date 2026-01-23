@@ -3,11 +3,14 @@ package api
 import (
 	"log"
 	stdhttp "net/http"
+	"strings"
+	"time"
 
 	intconfig "backend/internal/config"
 	h "backend/internal/http/handlers"
 	"backend/internal/http/middleware"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
@@ -15,14 +18,62 @@ func NewRouter(env intconfig.Env) *gin.Engine {
 	_ = env
 
 	r := gin.New()
-	r.Use(middleware.RequestID(), middleware.Logger(), gin.Recovery(), middleware.CORS())
+
+	// Middleware dasar
+	r.Use(
+		middleware.RequestID(),
+		middleware.Logger(),
+		gin.Recovery(),
+	)
+
+	// ✅ CORS FIX untuk Flutter Web (localhost dengan port dinamis)
+	// Ini akan mengizinkan origin seperti:
+	// http://localhost:54204, http://127.0.0.1:5000, dll.
+	r.Use(cors.New(cors.Config{
+		AllowOriginFunc: func(origin string) bool {
+			// izinkan localhost / 127.0.0.1 dengan port apa pun (dev)
+			origin = strings.ToLower(origin)
+			if strings.HasPrefix(origin, "http://localhost:") {
+				return true
+			}
+			if strings.HasPrefix(origin, "http://127.0.0.1:") {
+				return true
+			}
+			if strings.HasPrefix(origin, "https://localhost:") {
+				return true
+			}
+			if strings.HasPrefix(origin, "https://127.0.0.1:") {
+				return true
+			}
+			return false
+		},
+		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowHeaders: []string{
+			"Origin",
+			"Content-Type",
+			"Authorization",
+			"Accept",
+			"X-Requested-With",
+		},
+		ExposeHeaders: []string{
+			"Content-Length",
+			"Content-Disposition", // penting untuk download pdf/file
+		},
+		AllowCredentials: true,
+		MaxAge:           12 * time.Hour,
+	}))
 
 	if err := r.SetTrustedProxies(nil); err != nil {
 		log.Printf("warning: failed to set trusted proxies: %v", err)
 	}
+
+	// biar handler bisa akses router (kalau dipakai di kode kamu)
 	h.SetRouter(r)
 
-	r.OPTIONS("/*path", func(c *gin.Context) { c.AbortWithStatus(stdhttp.StatusNoContent) })
+	// ❌ HAPUS handler OPTIONS manual.
+	// Ini yang sering bikin preflight 204 tapi tanpa header CORS lengkap.
+	// (gin-contrib/cors sudah handle OPTIONS/preflight otomatis)
+	// r.OPTIONS("/*path", func(c *gin.Context) { c.AbortWithStatus(stdhttp.StatusNoContent) })
 
 	r.NoRoute(func(c *gin.Context) {
 		c.JSON(stdhttp.StatusNotFound, gin.H{

@@ -351,9 +351,9 @@ func UpdateReturnSetting(c *gin.Context) {
 	}
 
 	svc := services.ReturnService{
-		Repo:        repositories.ReturnRepository{},
-		BookingRepo: repositories.BookingRepository{},
-		SeatRepo:    repositories.BookingSeatRepository{},
+		Repo:        repositories.ReturnRepository{DB: intconfig.DB},
+		BookingRepo: repositories.BookingRepository{DB: intconfig.DB},
+		SeatRepo:    repositories.BookingSeatRepository{DB: intconfig.DB},
 		RequestID:   middleware.GetRequestID(c),
 	}
 	ret, err := svc.MarkPulang(id, raw)

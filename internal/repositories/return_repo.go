@@ -25,6 +25,31 @@ func (r ReturnRepository) db() *sql.DB {
 	return intconfig.DB
 }
 
+// helper SELECT expression (string)
+func (r ReturnRepository) selStr(db *sql.DB, table, col string) string {
+	if intdb.HasColumn(db, table, col) {
+		return "COALESCE(`" + col + "`, '')"
+	}
+	return "''"
+}
+
+// helper SELECT expression (number)
+func (r ReturnRepository) selNum(db *sql.DB, table, col string) string {
+	if intdb.HasColumn(db, table, col) {
+		return "COALESCE(`" + col + "`, 0)"
+	}
+	return "0"
+}
+
+// helper SELECT expression (datetime -> string)
+func (r ReturnRepository) selDateStr(db *sql.DB, table, col string) string {
+	if intdb.HasColumn(db, table, col) {
+		// CAST supaya hasil selalu string dan aman saat COALESCE dengan ''
+		return "COALESCE(CAST(`" + col + "` AS CHAR), '')"
+	}
+	return "''"
+}
+
 // GetByID loads return_settings row.
 func (r ReturnRepository) GetByID(id int) (models.ReturnSetting, error) {
 	if id <= 0 {
@@ -35,31 +60,58 @@ func (r ReturnRepository) GetByID(id int) (models.ReturnSetting, error) {
 	if db == nil || !intdb.HasTable(db, table) {
 		return models.ReturnSetting{}, sql.ErrNoRows
 	}
+
 	var d models.ReturnSetting
 	var count int
-	var depTime, routeFrom, routeTo, vehicleType sql.NullString
-	var createdAt sql.NullString
 
-	err := db.QueryRow(`
+	var depTime, routeFrom, routeTo, vehicleType, createdAt string
+
+	query := fmt.Sprintf(`
 		SELECT
 			id,
-			COALESCE(booking_name,''),
-			COALESCE(phone,''),
-			COALESCE(pickup_address,''),
-			COALESCE(departure_date,''),
-			COALESCE(seat_numbers,''),
-			COALESCE(passenger_count,0),
-			COALESCE(service_type,''),
-			COALESCE(driver_name,''),
-			COALESCE(vehicle_code,''),
-			COALESCE(surat_jalan_file,''),
-			COALESCE(surat_jalan_file_name,''),
-			COALESCE(departure_status,''),
-			COALESCE(trip_number,''),
-			COALESCE(booking_id,0),
-			COALESCE(departure_time,''), COALESCE(route_from,''), COALESCE(route_to,''), COALESCE(vehicle_type,''),
-			COALESCE(created_at,'')
-		FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s
+		FROM %s WHERE id=? LIMIT 1`,
+		r.selStr(db, table, "booking_name"),
+		r.selStr(db, table, "phone"),
+		r.selStr(db, table, "pickup_address"),
+		r.selStr(db, table, "departure_date"),
+		r.selStr(db, table, "seat_numbers"),
+		r.selNum(db, table, "passenger_count"),
+		r.selStr(db, table, "service_type"),
+		r.selStr(db, table, "driver_name"),
+		r.selStr(db, table, "vehicle_code"),
+		r.selStr(db, table, "surat_jalan_file"),
+		r.selStr(db, table, "surat_jalan_file_name"),
+		r.selStr(db, table, "departure_status"),
+		r.selStr(db, table, "trip_number"),
+		r.selNum(db, table, "booking_id"),
+		r.selStr(db, table, "departure_time"),
+		r.selStr(db, table, "route_from"),
+		r.selStr(db, table, "route_to"),
+		r.selStr(db, table, "vehicle_type"),
+		r.selDateStr(db, table, "created_at"),
+		table,
+	)
+
+	err := db.QueryRow(query, id).Scan(
 		&d.ID,
 		&d.BookingName,
 		&d.Phone,
@@ -75,18 +127,22 @@ func (r ReturnRepository) GetByID(id int) (models.ReturnSetting, error) {
 		&d.DepartureStatus,
 		&d.TripNumber,
 		&d.BookingID,
-		&depTime, &routeFrom, &routeTo, &vehicleType,
+		&depTime,
+		&routeFrom,
+		&routeTo,
+		&vehicleType,
 		&createdAt,
 	)
 	if err != nil {
 		return models.ReturnSetting{}, err
 	}
+
 	d.PassengerCount = strconv.Itoa(count)
-	d.DepartureTime = strings.TrimSpace(depTime.String)
-	d.RouteFrom = strings.TrimSpace(routeFrom.String)
-	d.RouteTo = strings.TrimSpace(routeTo.String)
-	d.VehicleType = strings.TrimSpace(vehicleType.String)
-	d.CreatedAt = strings.TrimSpace(createdAt.String)
+	d.DepartureTime = strings.TrimSpace(depTime)
+	d.RouteFrom = strings.TrimSpace(routeFrom)
+	d.RouteTo = strings.TrimSpace(routeTo)
+	d.VehicleType = strings.TrimSpace(vehicleType)
+	d.CreatedAt = strings.TrimSpace(createdAt)
 	return d, nil
 }
 
@@ -100,6 +156,7 @@ func (r ReturnRepository) GetByBookingID(bookingID int64) (models.ReturnSetting,
 	if db == nil || !intdb.HasTable(db, table) || !intdb.HasColumn(db, table, "booking_id") {
 		return models.ReturnSetting{}, sql.ErrNoRows
 	}
+
 	var id int
 	if err := db.QueryRow(`SELECT id FROM `+table+` WHERE booking_id=? ORDER BY id DESC LIMIT 1`, bookingID).Scan(&id); err != nil {
 		return models.ReturnSetting{}, err
@@ -107,28 +164,54 @@ func (r ReturnRepository) GetByBookingID(bookingID int64) (models.ReturnSetting,
 
 	var d models.ReturnSetting
 	var count int
-	var createdAt sql.NullString
-	var depTime, routeFrom, routeTo, vehicleType sql.NullString
-	_ = db.QueryRow(`
+	var depTime, routeFrom, routeTo, vehicleType, createdAt string
+
+	query := fmt.Sprintf(`
 		SELECT
 			id,
-			COALESCE(booking_name,''),
-			COALESCE(phone,''),
-			COALESCE(pickup_address,''),
-			COALESCE(departure_date,''),
-			COALESCE(seat_numbers,''),
-			COALESCE(passenger_count,0),
-			COALESCE(service_type,''),
-			COALESCE(driver_name,''),
-			COALESCE(vehicle_code,''),
-			COALESCE(surat_jalan_file,''),
-			COALESCE(surat_jalan_file_name,''),
-			COALESCE(departure_status,''),
-			COALESCE(trip_number,''),
-			COALESCE(booking_id,0),
-			COALESCE(departure_time,''), COALESCE(route_from,''), COALESCE(route_to,''), COALESCE(vehicle_type,''),
-			COALESCE(created_at,'')
-		FROM `+table+` WHERE id=? LIMIT 1`, id).Scan(
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s,
+			%s
+		FROM %s WHERE id=? LIMIT 1`,
+		r.selStr(db, table, "booking_name"),
+		r.selStr(db, table, "phone"),
+		r.selStr(db, table, "pickup_address"),
+		r.selStr(db, table, "departure_date"),
+		r.selStr(db, table, "seat_numbers"),
+		r.selNum(db, table, "passenger_count"),
+		r.selStr(db, table, "service_type"),
+		r.selStr(db, table, "driver_name"),
+		r.selStr(db, table, "vehicle_code"),
+		r.selStr(db, table, "surat_jalan_file"),
+		r.selStr(db, table, "surat_jalan_file_name"),
+		r.selStr(db, table, "departure_status"),
+		r.selStr(db, table, "trip_number"),
+		r.selNum(db, table, "booking_id"),
+		r.selStr(db, table, "departure_time"),
+		r.selStr(db, table, "route_from"),
+		r.selStr(db, table, "route_to"),
+		r.selStr(db, table, "vehicle_type"),
+		r.selDateStr(db, table, "created_at"),
+		table,
+	)
+
+	if err := db.QueryRow(query, id).Scan(
 		&d.ID,
 		&d.BookingName,
 		&d.Phone,
@@ -144,15 +227,21 @@ func (r ReturnRepository) GetByBookingID(bookingID int64) (models.ReturnSetting,
 		&d.DepartureStatus,
 		&d.TripNumber,
 		&d.BookingID,
-		&depTime, &routeFrom, &routeTo, &vehicleType,
+		&depTime,
+		&routeFrom,
+		&routeTo,
+		&vehicleType,
 		&createdAt,
-	)
+	); err != nil {
+		return models.ReturnSetting{}, err
+	}
+
 	d.PassengerCount = strconv.Itoa(count)
-	d.DepartureTime = strings.TrimSpace(depTime.String)
-	d.RouteFrom = strings.TrimSpace(routeFrom.String)
-	d.RouteTo = strings.TrimSpace(routeTo.String)
-	d.VehicleType = strings.TrimSpace(vehicleType.String)
-	d.CreatedAt = strings.TrimSpace(createdAt.String)
+	d.DepartureTime = strings.TrimSpace(depTime)
+	d.RouteFrom = strings.TrimSpace(routeFrom)
+	d.RouteTo = strings.TrimSpace(routeTo)
+	d.VehicleType = strings.TrimSpace(vehicleType)
+	d.CreatedAt = strings.TrimSpace(createdAt)
 	return d, nil
 }
 
@@ -326,6 +415,55 @@ func (r ReturnRepository) UpdatePartial(id int, rawJSON []byte) (models.ReturnSe
 	merged.ID = id
 	merged.PassengerCount = strconv.Itoa(count)
 	return merged, nil
+}
+
+// UpdateEnrich: update hasil fallback/enrichment tanpa tergantung payload key presence.
+func (r ReturnRepository) UpdateEnrich(id int, fields map[string]any) error {
+	if id <= 0 {
+		return sql.ErrNoRows
+	}
+	table := "return_settings"
+	db := r.db()
+	if db == nil || !intdb.HasTable(db, table) {
+		return fmt.Errorf("tabel return_settings tidak ditemukan")
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+
+	sets := []string{}
+	args := []any{}
+
+	for col, v := range fields {
+		if !intdb.HasColumn(db, table, col) {
+			continue
+		}
+
+		// jangan overwrite pakai string kosong
+		if sv, ok := v.(string); ok {
+			sv = strings.TrimSpace(sv)
+			if sv == "" {
+				continue
+			}
+			v = sv
+		}
+
+		sets = append(sets, "`"+col+"`=?")
+		args = append(args, v)
+	}
+
+	if len(sets) == 0 {
+		return nil
+	}
+
+	if intdb.HasColumn(db, table, "updated_at") {
+		sets = append(sets, "updated_at=?")
+		args = append(args, time.Now())
+	}
+
+	args = append(args, id)
+	_, err := db.Exec(`UPDATE `+table+` SET `+strings.Join(sets, ", ")+` WHERE id=?`, args...)
+	return err
 }
 
 type returnFieldPresence struct {

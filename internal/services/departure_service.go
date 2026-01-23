@@ -76,6 +76,8 @@ func (s DepartureService) MarkBerangkat(id int, rawPayload []byte) (models.Depar
 		return reloaded, err
 	}
 
+	log.Printf("[DEPARTURE] id=%d driverName=%s vehicleCode=%s vehicleType=%s", id, strings.TrimSpace(reloaded.DriverName), strings.TrimSpace(reloaded.VehicleCode), strings.TrimSpace(reloaded.VehicleType))
+
 	if strings.EqualFold(strings.TrimSpace(reloaded.DepartureStatus), "Berangkat") {
 		if err := s.syncAfterBerangkat(reloaded); err != nil {
 			utils.LogEvent(s.RequestID, "departure", "sync_after_berangkat_error", err.Error())

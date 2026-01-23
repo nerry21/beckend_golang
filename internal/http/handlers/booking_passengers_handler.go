@@ -122,20 +122,15 @@ func GetBookingPassengers(c *gin.Context) {
 	for _, seat := range seatList {
 		item := passengerMap[seat]
 		item.SeatCode = seat
-		if item.PassengerName == "" && item.PassengerPhone == "" {
-			item.PassengerPhone = bookingPhoneStr
-		}
 		if item.PaidPrice == 0 {
 			item.PaidPrice = utils.ComputeFare(routeFrom.String, routeTo.String, baseFare)
-		}
-		if item.PassengerPhone == "" && bookingPhoneStr != "" && withPassengerPhone {
-			item.PassengerPhone = bookingPhoneStr
 		}
 		resp = append(resp, item)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"booking_id":     bookingID,
+		"customer_phone": bookingPhoneStr,
 		"payment_status": strings.TrimSpace(paymentStatus.String),
 		"route_from":     routeFrom.String,
 		"route_to":       routeTo.String,

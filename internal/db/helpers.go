@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"sync"
 )
 
 type QueryRower interface {
@@ -18,7 +19,19 @@ func NullIfEmpty(s string) any {
 	return s
 }
 
+var (
+	tableCache  sync.Map // map[string]bool
+	columnCache sync.Map // map[string]bool, key: "table|column"
+)
+
 func HasTable(q QueryRower, table string) bool {
+	if table == "" {
+		return false
+	}
+	if v, ok := tableCache.Load(table); ok {
+		return v.(bool)
+	}
+
 	var name sql.NullString
 	err := q.QueryRow(`
 		SELECT table_name
@@ -27,16 +40,25 @@ func HasTable(q QueryRower, table string) bool {
 		  AND table_name = ?
 		LIMIT 1
 	`, table).Scan(&name)
-	if err != nil {
-		if errors.Is(err, driver.ErrBadConn) {
-			return false
-		}
-		return false
+
+	ok := (err == nil && name.Valid && name.String != "")
+	if err != nil && errors.Is(err, driver.ErrBadConn) {
+		ok = false
 	}
-	return name.Valid && name.String != ""
+
+	tableCache.Store(table, ok)
+	return ok
 }
 
 func HasColumn(q QueryRower, table, column string) bool {
+	if table == "" || column == "" {
+		return false
+	}
+	key := table + "|" + column
+	if v, ok := columnCache.Load(key); ok {
+		return v.(bool)
+	}
+
 	var name sql.NullString
 	err := q.QueryRow(`
 		SELECT column_name
@@ -46,20 +68,20 @@ func HasColumn(q QueryRower, table, column string) bool {
 		  AND column_name = ?
 		LIMIT 1
 	`, table, column).Scan(&name)
-	if err != nil {
-		if errors.Is(err, driver.ErrBadConn) {
-			return false
-		}
-		return false
+
+	ok := (err == nil && name.Valid && name.String != "")
+	if err != nil && errors.Is(err, driver.ErrBadConn) {
+		ok = false
 	}
-	return name.Valid && name.String != ""
+
+	columnCache.Store(key, ok)
+	return ok
 }
 
 // Keep lowercase helpers for call-site compatibility during refactor.
-func hasTable(q QueryRower, table string) bool {
-	return HasTable(q, table)
-}
-
+//nolint:unused // kept for backward compatibility during refactor.
+func hasTable(q QueryRower, table string) bool { return HasTable(q, table) }
+//nolint:unused // kept for backward compatibility during refactor.
 func hasColumn(q QueryRower, table, column string) bool {
 	return HasColumn(q, table, column)
 }

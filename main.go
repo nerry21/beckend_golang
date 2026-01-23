@@ -24,6 +24,7 @@ func main() {
 	intconfig.ConnectDB()
 	defer intconfig.CloseDB()
 
+	// Router (Gin engine)
 	r := router.NewRouter(env)
 
 	srv := &http.Server{

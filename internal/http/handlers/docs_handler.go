@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -83,27 +84,50 @@ func GetPassengerInvoicePDF(c *gin.Context) {
 	c.Data(http.StatusOK, "application/pdf", pdfBytes)
 }
 
+func isPaidStatus(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "lunas", "paid", "payment paid", "settlement", "success", "sukses", "approve", "approved", "pembayaran sukses":
+		return true
+	default:
+		return false
+	}
+}
+
 // isPaymentLunas checks payment status from bookings or payment_validations.
 func isPaymentLunas(passengerID int64) (bool, error) {
 	db := intconfig.DB
 	// dapatkan booking_id dari passengers
 	var bookingID sql.NullInt64
-	_ = db.QueryRow(`SELECT booking_id FROM passengers WHERE id=?`, passengerID).Scan(&bookingID)
+	if err := db.QueryRow(`SELECT booking_id FROM passengers WHERE id=?`, passengerID).Scan(&bookingID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
 	if !bookingID.Valid || bookingID.Int64 == 0 {
 		return false, nil
 	}
 
 	// cek bookings.payment_status
 	var payStatus sql.NullString
-	_ = db.QueryRow(`SELECT COALESCE(payment_status,'') FROM bookings WHERE id=?`, bookingID.Int64).Scan(&payStatus)
-	if strings.EqualFold(strings.TrimSpace(payStatus.String), "lunas") {
+	if err := db.QueryRow(`SELECT COALESCE(payment_status,'') FROM bookings WHERE id=?`, bookingID.Int64).Scan(&payStatus); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+	} else if isPaidStatus(payStatus.String) {
 		return true, nil
 	}
 
 	// cek payment_validations.payment_status
 	var pvStatus sql.NullString
-	_ = db.QueryRow(`SELECT payment_status FROM payment_validations WHERE booking_id=? ORDER BY id DESC LIMIT 1`, bookingID.Int64).Scan(&pvStatus)
-	if strings.EqualFold(strings.TrimSpace(pvStatus.String), "lunas") {
+	if err := db.QueryRow(`SELECT payment_status FROM payment_validations WHERE booking_id=? ORDER BY id DESC LIMIT 1`, bookingID.Int64).Scan(&pvStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if isPaidStatus(pvStatus.String) {
 		return true, nil
 	}
 	return false, nil

@@ -30,8 +30,11 @@ type DepartureSettingDTO struct {
 	PassengerCount     string `json:"passengerCount"`
 	ServiceType        string `json:"serviceType"`
 	DriverName         string `json:"driverName"`
+	DriverNameSnake    string `json:"driver_name"`
 	VehicleCode        string `json:"vehicleCode"`
+	VehicleCodeSnake   string `json:"vehicle_code"`
 	VehicleType        string `json:"vehicleType"`
+	VehicleTypeSnake   string `json:"vehicle_type"`
 	SuratJalanFile     string `json:"suratJalanFile"`
 	SuratJalanFileName string `json:"suratJalanFileName"`
 	DepartureStatus    string `json:"departureStatus"`
@@ -44,7 +47,7 @@ type DepartureSettingDTO struct {
 }
 
 func toDepartureDTO(dep models.DepartureSetting) DepartureSettingDTO {
-	return DepartureSettingDTO{
+	dto := DepartureSettingDTO{
 		ID:                 dep.ID,
 		BookingName:        strings.TrimSpace(dep.BookingName),
 		Phone:              strings.TrimSpace(dep.Phone),
@@ -54,8 +57,11 @@ func toDepartureDTO(dep models.DepartureSetting) DepartureSettingDTO {
 		PassengerCount:     strings.TrimSpace(dep.PassengerCount),
 		ServiceType:        strings.TrimSpace(dep.ServiceType),
 		DriverName:         strings.TrimSpace(dep.DriverName),
+		DriverNameSnake:    strings.TrimSpace(dep.DriverName),
 		VehicleCode:        strings.TrimSpace(dep.VehicleCode),
+		VehicleCodeSnake:   strings.TrimSpace(dep.VehicleCode),
 		VehicleType:        strings.TrimSpace(dep.VehicleType),
+		VehicleTypeSnake:   strings.TrimSpace(dep.VehicleType),
 		SuratJalanFile:     strings.TrimSpace(dep.SuratJalanFile),
 		SuratJalanFileName: strings.TrimSpace(dep.SuratJalanFileName),
 		DepartureStatus:    strings.TrimSpace(dep.DepartureStatus),
@@ -66,6 +72,9 @@ func toDepartureDTO(dep models.DepartureSetting) DepartureSettingDTO {
 		BookingID:          dep.BookingID,
 		CreatedAt:          strings.TrimSpace(dep.CreatedAt),
 	}
+
+	syncDepartureDTOAliases(&dto)
+	return dto
 }
 
 // GET /api/departure-settings
@@ -168,6 +177,7 @@ func GetDepartureSettings(c *gin.Context) {
 
 		d.PassengerCount = strconv.Itoa(countInt)
 		applyDepartureFallbacks(&d, driverVehicleMap)
+		syncDepartureDTOAliases(&d)
 		list = append(list, d)
 	}
 
@@ -278,6 +288,7 @@ func GetDepartureSettingByID(c *gin.Context) {
 
 	d.PassengerCount = strconv.Itoa(countInt)
 	applyDepartureFallbacks(&d, driverVehicleMap)
+	syncDepartureDTOAliases(&d)
 
 	c.JSON(http.StatusOK, d)
 }
@@ -373,6 +384,7 @@ func CreateDepartureSetting(c *gin.Context) {
 		_ = intconfig.DB.QueryRow("SELECT COALESCE(created_at, '') FROM "+table+" WHERE id = ? LIMIT 1", id).Scan(&input.CreatedAt)
 	}
 
+	syncDepartureDTOAliases(&input)
 	c.JSON(http.StatusCreated, input)
 }
 
@@ -408,7 +420,10 @@ func UpdateDepartureSetting(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, toDepartureDTO(dep))
+	dto := toDepartureDTO(dep)
+	applyDepartureFallbacks(&dto, loadDriverVehicleTypes())
+	syncDepartureDTOAliases(&dto)
+	c.JSON(http.StatusOK, dto)
 }
 
 // DELETE /api/departure-settings/:id
@@ -456,6 +471,35 @@ func applyDepartureFallbacks(d *DepartureSettingDTO, driverVehicleMap map[string
 			d.VehicleType = vt
 		}
 	}
+
+	syncDepartureDTOAliases(d)
+}
+
+func syncDepartureDTOAliases(d *DepartureSettingDTO) {
+	if d == nil {
+		return
+	}
+
+	driver := pickNonEmptyTrim(d.DriverName, d.DriverNameSnake)
+	d.DriverName = driver
+	d.DriverNameSnake = driver
+
+	vehicleCode := pickNonEmptyTrim(d.VehicleCode, d.VehicleCodeSnake)
+	d.VehicleCode = vehicleCode
+	d.VehicleCodeSnake = vehicleCode
+
+	vehicleType := pickNonEmptyTrim(d.VehicleType, d.VehicleTypeSnake)
+	d.VehicleType = vehicleType
+	d.VehicleTypeSnake = vehicleType
+}
+
+func pickNonEmptyTrim(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // helper: ambil e_surat_jalan dari trip_information (best effort)
@@ -494,49 +538,54 @@ func buildSuratJalanAPI(bookingID int64) string {
 
 // loadDriverVehicleTypes memuat map nama driver (lowercase) -> vehicle_type dari tabel drivers
 func loadDriverVehicleTypes() map[string]string {
-	if intconfig.DB == nil || !intdb.HasTable(intconfig.DB, "drivers") {
+	if intconfig.DB == nil {
 		return map[string]string{}
 	}
 
-	cols := []string{"name"}
-	if intdb.HasColumn(intconfig.DB, "drivers", "vehicle_type") {
-		cols = append(cols, "vehicle_type")
-	}
-	if len(cols) == 1 {
-		return map[string]string{}
-	}
+	result := map[string]string{}
 
-	q := fmt.Sprintf(`SELECT %s FROM drivers`, strings.Join(cols, ","))
-	rows, err := intconfig.DB.Query(q)
-	if err != nil {
-		log.Println("loadDriverVehicleTypes query error:", err)
-		return map[string]string{}
-	}
-	defer rows.Close()
-
-	type pair struct {
-		Name        string
-		VehicleType string
-	}
-	list := []pair{}
-
-	for rows.Next() {
-		var name, vt sql.NullString
-		if err := rows.Scan(&name, &vt); err != nil {
-			return map[string]string{}
+	addRows := func(rows *sql.Rows) {
+		if rows == nil {
+			return
 		}
-		list = append(list, pair{
-			Name:        strings.TrimSpace(name.String),
-			VehicleType: strings.TrimSpace(vt.String),
-		})
+		defer rows.Close()
+		for rows.Next() {
+			var name, vt sql.NullString
+			if err := rows.Scan(&name, &vt); err != nil {
+				return
+			}
+			n := strings.ToLower(strings.TrimSpace(name.String))
+			v := strings.TrimSpace(vt.String)
+			if n == "" || v == "" {
+				continue
+			}
+			if _, exists := result[n]; !exists {
+				result[n] = v
+			}
+		}
 	}
 
-	m := map[string]string{}
-	for _, p := range list {
-		if p.Name == "" || p.VehicleType == "" {
-			continue
+	if intdb.HasTable(intconfig.DB, "drivers") &&
+		intdb.HasColumn(intconfig.DB, "drivers", "name") &&
+		intdb.HasColumn(intconfig.DB, "drivers", "vehicle_type") {
+		rows, err := intconfig.DB.Query(`SELECT COALESCE(name,''), COALESCE(vehicle_type,'') FROM drivers`)
+		if err != nil {
+			log.Println("loadDriverVehicleTypes drivers error:", err)
+		} else {
+			addRows(rows)
 		}
-		m[strings.ToLower(p.Name)] = p.VehicleType
 	}
-	return m
+
+	if intdb.HasTable(intconfig.DB, "driver_accounts") &&
+		intdb.HasColumn(intconfig.DB, "driver_accounts", "driver_name") &&
+		intdb.HasColumn(intconfig.DB, "driver_accounts", "vehicle_type") {
+		rows, err := intconfig.DB.Query(`SELECT COALESCE(driver_name,''), COALESCE(vehicle_type,'') FROM driver_accounts`)
+		if err != nil {
+			log.Println("loadDriverVehicleTypes driver_accounts error:", err)
+		} else {
+			addRows(rows)
+		}
+	}
+
+	return result
 }
